@@ -94,7 +94,7 @@ func (d *SMBDriver) Mount(mountID int, config map[string]string) error {
 }
 
 func (d *SMBDriver) connect() error {
-	addr := fmt.Sprintf("%s:%d", d.host, d.port)
+	addr := net.JoinHostPort(d.host, strconv.Itoa(d.port))
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
