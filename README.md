@@ -17,18 +17,44 @@ process-wide registry via `init()`. Two build outputs are produced:
 
 ## Drivers
 
-| Type    | ID | Package                  | Upstream dependency                             |
-|---------|----|--------------------------|-------------------------------------------------|
-| FTP     |  1 | `go-networkfs/ftp`       | `github.com/jlaffaye/ftp`                       |
-| SFTP    |  2 | `go-networkfs/sftp`      | `github.com/pkg/sftp` + `golang.org/x/crypto`   |
-| SMB     |  3 | `go-networkfs/smb`       | `github.com/hirochachacha/go-smb2`              |
-| Dropbox |  4 | `go-networkfs/dropbox`   | `github.com/dropbox/dropbox-sdk-go-unofficial/v6` |
-| WebDAV  |  5 | `go-networkfs/webdav`    | `github.com/studio-b12/gowebdav`                |
-| GDrive  |  6 | `go-networkfs/gdrive`    | net/http (Drive v3 REST, OAuth2 refresh)        |
-| S3      |  7 | `go-networkfs/s3`        | `github.com/minio/minio-go/v7`                  |
+| Type     | ID | Package                  | Upstream dependency                               |
+|----------|----|--------------------------|---------------------------------------------------|
+| FTP      |  1 | `go-networkfs/ftp`       | `github.com/jlaffaye/ftp`                         |
+| SFTP     |  2 | `go-networkfs/sftp`      | `github.com/pkg/sftp` + `golang.org/x/crypto`     |
+| SMB      |  3 | `go-networkfs/smb`       | `github.com/hirochachacha/go-smb2`                |
+| Dropbox  |  4 | `go-networkfs/dropbox`   | `github.com/dropbox/dropbox-sdk-go-unofficial/v6` |
+| WebDAV   |  5 | `go-networkfs/webdav`    | `github.com/studio-b12/gowebdav`                  |
+| GDrive   |  6 | `go-networkfs/gdrive`    | stdlib only (Drive v3 REST, OAuth2 refresh)       |
+| S3       |  7 | `go-networkfs/s3`        | `github.com/minio/minio-go/v7`                    |
+| OneDrive |  8 | `go-networkfs/onedrive`  | stdlib only (Microsoft Graph v1.0, OAuth2 refresh)|
 
 All drivers implement: `Mount`, `Unmount`, `Stat`, `ListDir`, `OpenFile`,
 `CreateFile`, `Mkdir`, `Remove`, `Rename`.
+
+### Configuration keys
+
+Passed to `Mount` as a `map[string]string` (Go) or JSON object (C):
+
+| Driver              | Required keys                                                        |
+|---------------------|----------------------------------------------------------------------|
+| FTP                 | `host`, `port`, `user`, `pass`, optional `tls` (`"explicit"` for FTPS)|
+| SFTP                | `host`, `port`, `user`, and either `pass` or `private_key`           |
+| SMB                 | `host`, `share`, `user`, `pass`, optional `domain`                   |
+| WebDAV              | `url`, `user`, `pass`                                                |
+| Dropbox             | `access_token` (long-lived; refresh-token support is a follow-up)    |
+| GDrive              | `client_id`, `client_secret`, `refresh_token`                        |
+| S3                  | `endpoint`, `region`, `bucket`, `access_key`, `secret_key`, `use_ssl`|
+| OneDrive            | `client_id`, `refresh_token`, optional `client_secret` (empty for PKCE public client) |
+
+GDrive and OneDrive refresh access tokens on demand — proactively from
+the `expires_in` response field and reactively on HTTP 401. OneDrive also
+honours refresh-token rotation if Microsoft issues a new one on refresh.
+
+### Licensing
+
+All dependencies are under permissive licenses (MIT / BSD / Apache-2.0 / ISC).
+No GPL / LGPL / AGPL — so consumers can link these static libraries into
+closed-source binaries without copyleft obligations.
 
 ## Usage
 
@@ -70,7 +96,14 @@ int  ftp_rename(int mount_id, const char* old_path, const char* new_path);
 void ftp_free(char* ptr);
 ```
 
-Swap `ftp` for `sftp`, `smb`, `dropbox`, `webdav`, `gdrive`, or `s3` — same symbol shape.
+Swap `ftp` for `sftp`, `smb`, `dropbox`, `webdav`, `gdrive`, `s3`, or
+`onedrive` — same symbol shape.
+
+> **Note:** `onedrive/cmd/onedrive/main.go` is not yet written, so
+> `libonedrive.a` cannot currently be built standalone. OneDrive is
+> reachable through the combined dispatcher (`libnetworkfs.a`) today.
+> Adding the cmd main is mechanical — see `gdrive/cmd/gdrive/main.go`
+> as a template.
 
 ### As a C library — combined dispatcher
 
@@ -98,16 +131,18 @@ void networkfs_free(char* ptr);
 ## Architecture
 
 ```
-pkg/api/            - Shared Driver interface + MountManager
-pkg/api/cgo/        - C bridge utilities (reference; inlined per-main)
-cmd/networkfs/      - Combined dispatcher   -> libnetworkfs.a
-ftp/     ftp/cmd/ftp/     - FTP driver      -> libftp.a
-sftp/    sftp/cmd/sftp/   - SFTP driver     -> libsftp.a
-smb/     smb/cmd/smb/     - SMB driver      -> libsmb.a
-dropbox/ dropbox/cmd/dropbox/ - Dropbox driver -> libdropbox.a
-webdav/  webdav/cmd/webdav/   - WebDAV driver  -> libwebdav.a
-gdrive/  gdrive/cmd/gdrive/   - GDrive driver  -> libgdrive.a
-s3/      s3/cmd/s3/           - S3 driver      -> libs3.a
+pkg/api/              - Shared Driver interface + MountManager
+pkg/api/cgo/          - C bridge utilities (reference; inlined per-main)
+cmd/networkfs/        - Combined dispatcher       -> libnetworkfs.a
+ftp/      ftp/cmd/ftp/           - FTP driver     -> libftp.a
+sftp/     sftp/cmd/sftp/         - SFTP driver    -> libsftp.a
+smb/      smb/cmd/smb/           - SMB driver     -> libsmb.a
+dropbox/  dropbox/cmd/dropbox/   - Dropbox driver -> libdropbox.a
+webdav/   webdav/cmd/webdav/     - WebDAV driver  -> libwebdav.a
+gdrive/   gdrive/cmd/gdrive/     - GDrive driver  -> libgdrive.a
+s3/       s3/cmd/s3/             - S3 driver      -> libs3.a
+onedrive/                        - OneDrive driver (combined dispatcher only;
+                                   standalone lib pending cmd/onedrive/main.go)
 ```
 
 ### Why the cgo helpers are inlined per-main
