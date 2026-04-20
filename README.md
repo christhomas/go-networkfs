@@ -99,12 +99,6 @@ void ftp_free(char* ptr);
 Swap `ftp` for `sftp`, `smb`, `dropbox`, `webdav`, `gdrive`, `s3`, or
 `onedrive` — same symbol shape.
 
-> **Note:** `onedrive/cmd/onedrive/main.go` is not yet written, so
-> `libonedrive.a` cannot currently be built standalone. OneDrive is
-> reachable through the combined dispatcher (`libnetworkfs.a`) today.
-> Adding the cmd main is mechanical — see `gdrive/cmd/gdrive/main.go`
-> as a template.
-
 ### As a C library — combined dispatcher
 
 ```bash
@@ -141,8 +135,7 @@ dropbox/  dropbox/cmd/dropbox/   - Dropbox driver -> libdropbox.a
 webdav/   webdav/cmd/webdav/     - WebDAV driver  -> libwebdav.a
 gdrive/   gdrive/cmd/gdrive/     - GDrive driver  -> libgdrive.a
 s3/       s3/cmd/s3/             - S3 driver      -> libs3.a
-onedrive/                        - OneDrive driver (combined dispatcher only;
-                                   standalone lib pending cmd/onedrive/main.go)
+onedrive/ onedrive/cmd/onedrive/ - OneDrive driver -> libonedrive.a
 ```
 
 ### Why the cgo helpers are inlined per-main
