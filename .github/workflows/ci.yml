@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ["1.24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: go mod verify
+        run: go mod verify
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: test with coverage
+        run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: coverage
+          path: coverage.out
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l -s .)
+          if [ -n "$out" ]; then
+            echo "gofmt -s would reformat:"
+            echo "$out"
+            exit 1
+          fi
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        run: govulncheck ./...
+
+  build-archives:
+    name: c-archive builds (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: build libftp.a
+        run: go build -buildmode=c-archive -o libftp.a ./ftp/cmd/ftp
+
+      - name: build libsftp.a
+        run: go build -buildmode=c-archive -o libsftp.a ./sftp/cmd/sftp
+
+      - name: build libsmb.a
+        run: go build -buildmode=c-archive -o libsmb.a ./smb/cmd/smb
+
+      - name: build libdropbox.a
+        run: go build -buildmode=c-archive -o libdropbox.a ./dropbox/cmd/dropbox
+
+      - name: build libwebdav.a
+        run: go build -buildmode=c-archive -o libwebdav.a ./webdav/cmd/webdav
+
+      - name: build libgdrive.a
+        run: go build -buildmode=c-archive -o libgdrive.a ./gdrive/cmd/gdrive
+
+      - name: build libs3.a
+        run: go build -buildmode=c-archive -o libs3.a ./s3/cmd/s3
+
+      - name: build libonedrive.a
+        run: go build -buildmode=c-archive -o libonedrive.a ./onedrive/cmd/onedrive
+
+      - name: build libnetworkfs.a (unified dispatcher)
+        run: go build -buildmode=c-archive -o libnetworkfs.a ./cmd/networkfs
+
+      - name: build tui
+        run: go build -o networkfs ./cmd/tui

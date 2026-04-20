@@ -1,0 +1,17 @@
+build/
+coverage.out
+coverage.html
+*.a
+*.h
+# Root-only (the stray `go build ./cmd/tui` artefact). Anchored with a
+# leading slash so the cmd/tui source directory isn't excluded.
+/tui
+
+# VSCode "Local History" extension artefacts.
+.history/
+
+# TUI account preset file. Ignored everywhere because it typically
+# holds real credentials. The one under test-server/ is committed as a
+# reference — it only references the dummy docker creds.
+.env.yaml
+!test-server/.env.yaml

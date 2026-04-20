@@ -1,0 +1,24 @@
+name: go-networkfs
+
+# Test credentials live here so they're visible at a glance. The same
+# user / password are used across all four services (FTP, SFTP, WebDAV,
+# SMB). Override with TEST_USER / TEST_PASSWORD env vars or a .env file
+# in this directory.
+services:
+  test-server:
+    build:
+      context: .
+      args:
+        TEST_USER: ${TEST_USER:-testuser}
+        TEST_PASSWORD: ${TEST_PASSWORD:-testpass}
+    environment:
+      TEST_USER: ${TEST_USER:-testuser}
+      TEST_PASSWORD: ${TEST_PASSWORD:-testpass}
+    ports:
+      - "2223:22"       # SFTP
+      - "2121:21"       # FTP
+      - "21000-21010:21000-21010"  # FTP passive
+      - "8080:8080"     # WebDAV
+      - "4450:445"      # SMB (4450 to avoid conflict with host)
+    volumes:
+      - ./data:/data
