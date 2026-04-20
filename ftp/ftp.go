@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -157,44 +158,87 @@ func (d *FTPDriver) withReconnect(op func() error) error {
 	return err
 }
 
-// Stat retrieves file/directory info
+// Stat retrieves file/directory info.
+//
+// Primary path is MLST via GetEntry. Servers that don't implement MLST
+// (e.g. vsftpd returns 502 Command not implemented) fall back to listing
+// the parent directory and matching by name.
 func (d *FTPDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	if !d.connected || d.client == nil {
 		return api.FileInfo{}, api.ErrNotConnected
+	}
+
+	if path == "" || path == "/" {
+		return api.FileInfo{Name: "/", Path: "/", IsDir: true}, nil
 	}
 
 	var info api.FileInfo
 	absPath := d.rootPath + path
 
 	err := d.withReconnect(func() error {
-		// Try to get entry info
 		e, err := d.client.GetEntry(absPath)
-		if err != nil {
-			// If it's a directory, try listing it
-			_, listErr := d.client.List(absPath)
-			if listErr == nil {
-				info = api.FileInfo{
-					Name:  d.nameFromPath(path),
-					Path:  path,
-					IsDir: true,
-					Size:  0,
-				}
-				return nil
-			}
-			return err
+		if err == nil {
+			info = entryToFileInfo(e, path)
+			return nil
 		}
-
-		info = api.FileInfo{
-			Name:    e.Name,
-			Path:    path,
-			IsDir:   e.Type == ftp.EntryTypeFolder,
-			Size:    int64(e.Size),
-			ModTime: time.Time(e.Time).Unix(),
+		if isNotImplemented(err) {
+			return d.statViaParentList(path, &info)
 		}
-		return nil
+		return err
 	})
 
 	return info, err
+}
+
+// statViaParentList resolves Stat by LIST-ing the parent directory and
+// matching the basename. Used when the server refuses MLST.
+func (d *FTPDriver) statViaParentList(path string, out *api.FileInfo) error {
+	absPath := d.rootPath + path
+	parentAbs, name := splitParentName(absPath)
+	entries, err := d.client.List(parentAbs)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name == name {
+			*out = entryToFileInfo(e, path)
+			return nil
+		}
+	}
+	return api.ErrNotFound
+}
+
+func entryToFileInfo(e *ftp.Entry, path string) api.FileInfo {
+	return api.FileInfo{
+		Name:    e.Name,
+		Path:    path,
+		IsDir:   e.Type == ftp.EntryTypeFolder,
+		Size:    int64(e.Size),
+		ModTime: time.Time(e.Time).Unix(),
+	}
+}
+
+func isNotImplemented(err error) bool {
+	if err == nil {
+		return false
+	}
+	if te, ok := err.(*textproto.Error); ok {
+		return te.Code == ftp.StatusNotImplemented ||
+			te.Code == ftp.StatusNotImplementedParameter
+	}
+	return strings.Contains(err.Error(), "502")
+}
+
+func splitParentName(absPath string) (parent, name string) {
+	trimmed := strings.TrimRight(absPath, "/")
+	idx := strings.LastIndex(trimmed, "/")
+	if idx < 0 {
+		return "/", trimmed
+	}
+	if idx == 0 {
+		return "/", trimmed[1:]
+	}
+	return trimmed[:idx], trimmed[idx+1:]
 }
 
 // ListDir returns directory entries
