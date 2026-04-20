@@ -447,20 +447,43 @@ func (d *GDriveDriver) doRefresh() error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("refresh HTTP %d: %s", resp.StatusCode, string(body))
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	accessToken, err := parseTokenResponse(resp.StatusCode, body)
+	if err != nil {
+		return err
+	}
+	d.tokenMu.Lock()
+	d.accessToken = accessToken
+	d.tokenMu.Unlock()
+	return nil
+}
+
+// parseTokenResponse is the pure kernel of doRefresh: given the HTTP
+// status and raw body from Google's /token endpoint, it returns either
+// the access_token string or a formatted error. Broken out so the
+// success path (JSON decode) and failure path (status + body format)
+// can be tested directly without spinning up an httptest OAuth server.
+//
+// Wire spec:
+//   200 + body with {"access_token": "..."} → returns the token
+//   non-200                                   → error "refresh HTTP <code>: <body>"
+//   200 + malformed JSON                      → JSON decode error
+//   200 + valid JSON but empty access_token   → returns "" and nil (caller
+//                                                can choose to reject if it cares)
+func parseTokenResponse(status int, body []byte) (string, error) {
+	if status != 200 {
+		return "", fmt.Errorf("refresh HTTP %d: %s", status, string(body))
 	}
 	var result struct {
 		AccessToken string `json:"access_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return err
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
 	}
-	d.tokenMu.Lock()
-	d.accessToken = result.AccessToken
-	d.tokenMu.Unlock()
-	return nil
+	return result.AccessToken, nil
 }
 
 func (d *GDriveDriver) authHeader() string {

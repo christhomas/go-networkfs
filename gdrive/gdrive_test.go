@@ -3,6 +3,7 @@
 package gdrive
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
@@ -306,5 +307,78 @@ func TestUnmountOnUnmounted(t *testing.T) {
 	d := &GDriveDriver{}
 	if err := d.Unmount(1); err != nil {
 		t.Fatalf("Unmount on unmounted driver: want nil, got %v", err)
+	}
+}
+
+// --- parseTokenResponse (extracted from doRefresh) ----------------------
+//
+// Pure kernel: HTTP status + body bytes → access_token or formatted
+// error. Covers every branch without needing to stand up an httptest
+// server, which was the whole point of the extraction.
+
+func TestParseTokenResponse_Success(t *testing.T) {
+	body := []byte(`{"access_token":"ya29.abc","expires_in":3600,"token_type":"Bearer"}`)
+	tok, err := parseTokenResponse(200, body)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if tok != "ya29.abc" {
+		t.Errorf("token = %q, want ya29.abc", tok)
+	}
+}
+
+func TestParseTokenResponse_NonSuccessStatusFormatsBodyIntoError(t *testing.T) {
+	body := []byte(`{"error":"invalid_grant"}`)
+	_, err := parseTokenResponse(400, body)
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "400") {
+		t.Errorf("status missing from error: %q", msg)
+	}
+	if !strings.Contains(msg, "invalid_grant") {
+		t.Errorf("body missing from error: %q", msg)
+	}
+}
+
+func TestParseTokenResponse_MalformedJSON(t *testing.T) {
+	_, err := parseTokenResponse(200, []byte("not json"))
+	if err == nil {
+		t.Fatal("expected JSON decode error")
+	}
+}
+
+// Per the documented wire spec, 200 + missing access_token returns
+// "" and no error. The caller decides whether that's acceptable.
+func TestParseTokenResponse_MissingAccessToken(t *testing.T) {
+	tok, err := parseTokenResponse(200, []byte(`{"other":"value"}`))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if tok != "" {
+		t.Errorf("tok = %q, want empty", tok)
+	}
+}
+
+// 5xx path also formats status into error (same branch as 4xx).
+func TestParseTokenResponse_5xxAlsoFormatted(t *testing.T) {
+	_, err := parseTokenResponse(503, []byte("service unavailable"))
+	if err == nil {
+		t.Fatal("expected error for 503")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("status missing: %q", err.Error())
+	}
+}
+
+// Empty body on non-success is fine — just formats with empty string.
+func TestParseTokenResponse_EmptyBodyOnError(t *testing.T) {
+	_, err := parseTokenResponse(401, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("status missing: %q", err.Error())
 	}
 }
