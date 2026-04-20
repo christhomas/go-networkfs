@@ -382,3 +382,70 @@ func TestParseTokenResponse_EmptyBodyOnError(t *testing.T) {
 		t.Errorf("status missing: %q", err.Error())
 	}
 }
+
+// --- shouldRefreshAndRetry (extracted predicate) ------------------------
+
+func TestShouldRefreshAndRetry(t *testing.T) {
+	// Only 401 triggers a refresh+retry. Everything else — including
+	// neighbours like 400 and 403, and unrelated codes like 200, 429,
+	// 500 — must return false.
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{200, false},
+		{400, false},
+		{401, true},
+		{403, false},
+		{404, false},
+		{418, false},
+		{429, false},
+		{500, false},
+		{503, false},
+	}
+	for _, c := range cases {
+		if got := shouldRefreshAndRetry(c.status); got != c.want {
+			t.Errorf("shouldRefreshAndRetry(%d) = %v, want %v", c.status, got, c.want)
+		}
+	}
+}
+
+// --- formatAPIError (extracted formatter) -------------------------------
+
+func TestFormatAPIError_IncludesStatusAndBody(t *testing.T) {
+	err := formatAPIError(404, []byte(`{"error":"not found"}`))
+	if err == nil {
+		t.Fatal("nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "API HTTP") {
+		t.Errorf("prefix missing: %q", msg)
+	}
+	if !strings.Contains(msg, "404") {
+		t.Errorf("status missing: %q", msg)
+	}
+	if !strings.Contains(msg, "not found") {
+		t.Errorf("body missing: %q", msg)
+	}
+}
+
+func TestFormatAPIError_EmptyBody(t *testing.T) {
+	err := formatAPIError(503, nil)
+	if err == nil {
+		t.Fatal("nil error")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("status missing: %q", err.Error())
+	}
+}
+
+// Pin the exact message shape — four API methods used to emit this
+// string inline, so any change here is observable to downstream callers
+// who string-match on it.
+func TestFormatAPIError_ExactShape(t *testing.T) {
+	err := formatAPIError(418, []byte("teapot"))
+	want := "API HTTP 418: teapot"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}

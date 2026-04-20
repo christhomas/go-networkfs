@@ -493,6 +493,23 @@ func (d *GDriveDriver) authHeader() string {
 	return "Bearer " + tok
 }
 
+// shouldRefreshAndRetry is the pure predicate for "does this response
+// warrant a token refresh + single retry?". Today only 401 qualifies —
+// broken out so the four API helpers (apiRawGET / apiGET / apiJSON /
+// apiDELETE) share the same decision instead of each open-coding it.
+func shouldRefreshAndRetry(status int) bool {
+	return status == 401
+}
+
+// formatAPIError is the pure formatter for non-2xx Google Drive API
+// responses. Called after the 401 retry dance is over, so a 401 here
+// means "even after refresh the request still failed", not "needs
+// refresh". Shape matches the prior inline fmt.Errorf so no caller
+// sees a different error string.
+func formatAPIError(status int, body []byte) error {
+	return fmt.Errorf("API HTTP %d: %s", status, string(body))
+}
+
 // apiRawGET issues an authorized GET and returns the raw response. The
 // caller owns resp.Body. Retries once on 401 after refreshing the token.
 func (d *GDriveDriver) apiRawGET(urlStr string) (*http.Response, error) {
@@ -506,7 +523,7 @@ func (d *GDriveDriver) apiRawGET(urlStr string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == 401 {
+	if shouldRefreshAndRetry(resp.StatusCode) {
 		resp.Body.Close()
 		if err := d.doRefresh(); err != nil {
 			return nil, fmt.Errorf("401 and refresh failed: %w", err)
@@ -521,7 +538,7 @@ func (d *GDriveDriver) apiRawGET(urlStr string) (*http.Response, error) {
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, formatAPIError(resp.StatusCode, body)
 	}
 	return resp, nil
 }
@@ -555,7 +572,7 @@ func (d *GDriveDriver) apiJSON(method, urlStr string, body []byte) (map[string]i
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == 401 {
+	if shouldRefreshAndRetry(resp.StatusCode) {
 		resp.Body.Close()
 		if err := d.doRefresh(); err != nil {
 			return nil, fmt.Errorf("401 and refresh failed: %w", err)
@@ -568,7 +585,7 @@ func (d *GDriveDriver) apiJSON(method, urlStr string, body []byte) (map[string]i
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API HTTP %d: %s", resp.StatusCode, string(b))
+		return nil, formatAPIError(resp.StatusCode, b)
 	}
 
 	var result map[string]interface{}
@@ -594,7 +611,7 @@ func (d *GDriveDriver) apiDELETE(urlStr string) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == 401 {
+	if shouldRefreshAndRetry(resp.StatusCode) {
 		resp.Body.Close()
 		if err := d.doRefresh(); err != nil {
 			return fmt.Errorf("401 and refresh failed: %w", err)
@@ -607,7 +624,7 @@ func (d *GDriveDriver) apiDELETE(urlStr string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 && resp.StatusCode != 204 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API HTTP %d: %s", resp.StatusCode, string(body))
+		return formatAPIError(resp.StatusCode, body)
 	}
 	return nil
 }
@@ -667,7 +684,7 @@ func (d *GDriveDriver) uploadFile(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == 401 {
+	if shouldRefreshAndRetry(resp.StatusCode) {
 		resp.Body.Close()
 		if err := d.doRefresh(); err != nil {
 			return fmt.Errorf("401 and refresh failed: %w", err)
@@ -680,6 +697,9 @@ func (d *GDriveDriver) uploadFile(path string, data []byte) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
+		// uploadFile keeps its own "upload HTTP ..." prefix rather than
+		// the generic "API HTTP ..." — callers distinguish upload
+		// failures from plain API failures by the string.
 		return fmt.Errorf("upload HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
