@@ -136,6 +136,12 @@ type DriverError struct {
 	Message string `json:"message"`
 }
 
-func (e *DriverError) Error() string {
+// Error implements the error interface.
+//
+// Uses a value receiver so both `DriverError{...}` and `&DriverError{...}`
+// satisfy `error`. A pointer receiver silently broke callers that returned
+// a value type — the struct literal compiled fine at the call site but
+// produced a non-error value.
+func (e DriverError) Error() string {
 	return e.Message
 }
