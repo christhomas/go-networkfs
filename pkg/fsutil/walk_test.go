@@ -20,9 +20,9 @@ type memDriver struct {
 	listErr map[string]error // path -> error to return from ListDir
 }
 
-func (m *memDriver) Name() string                             { return "mem" }
-func (m *memDriver) Mount(int, map[string]string) error       { return nil }
-func (m *memDriver) Unmount(int) error                        { return nil }
+func (m *memDriver) Name() string                       { return "mem" }
+func (m *memDriver) Mount(int, map[string]string) error { return nil }
+func (m *memDriver) Unmount(int) error                  { return nil }
 func (m *memDriver) OpenFile(int, string) (io.ReadCloser, error) {
 	return nil, errors.New("unsupported")
 }

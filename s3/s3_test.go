@@ -31,8 +31,8 @@ func TestNormalizePrefix(t *testing.T) {
 		{"/foo/bar/", "foo/bar/"},
 		{"//foo//bar//", "foo//bar/"}, // only outermost slashes are trimmed
 		{"a", "a/"},
-		{"café", "café/"},     // unicode preserved
-		{"日本語/", "日本語/"},     // unicode preserved
+		{"café", "café/"}, // unicode preserved
+		{"日本語/", "日本語/"},  // unicode preserved
 		{"/日本語", "日本語/"},
 	}
 	for _, c := range cases {

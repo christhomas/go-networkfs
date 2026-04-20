@@ -89,7 +89,9 @@ func onedrive_version() *C.char {
 
 // mountID: unique identifier for this mount instance
 // configJSON: {"client_id":"...","client_secret":"...","refresh_token":"..."}
-//   client_secret may be empty for PKCE public clients.
+//
+//	client_secret may be empty for PKCE public clients.
+//
 // Returns: 0 on success, 1 on mount failure, -1 on invalid JSON
 //
 //export onedrive_mount

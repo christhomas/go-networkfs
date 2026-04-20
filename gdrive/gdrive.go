@@ -468,11 +468,12 @@ func (d *GDriveDriver) doRefresh() error {
 // can be tested directly without spinning up an httptest OAuth server.
 //
 // Wire spec:
-//   200 + body with {"access_token": "..."} → returns the token
-//   non-200                                   → error "refresh HTTP <code>: <body>"
-//   200 + malformed JSON                      → JSON decode error
-//   200 + valid JSON but empty access_token   → returns "" and nil (caller
-//                                                can choose to reject if it cares)
+//
+//	200 + body with {"access_token": "..."} → returns the token
+//	non-200                                   → error "refresh HTTP <code>: <body>"
+//	200 + malformed JSON                      → JSON decode error
+//	200 + valid JSON but empty access_token   → returns "" and nil (caller
+//	                                             can choose to reject if it cares)
 func parseTokenResponse(status int, body []byte) (string, error) {
 	if status != 200 {
 		return "", fmt.Errorf("refresh HTTP %d: %s", status, string(body))

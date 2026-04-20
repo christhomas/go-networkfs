@@ -143,15 +143,19 @@ func (d *S3Driver) Stat(mountID int, path string) (api.FileInfo, error) {
 		}, nil
 	}
 
-	// Directory? A key exists under `key/` (either a placeholder or a child).
+	// Directory? A key exists under `key/` (either a placeholder or a
+	// child). MaxKeys=1 means the channel yields at most one event, so
+	// a single receive is enough — a for-range loop that always exits
+	// on the first iteration was tripping staticcheck SA4004.
 	dirPrefix := key + "/"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for obj := range d.client.ListObjects(ctx, d.bucket, minio.ListObjectsOptions{
+	ch := d.client.ListObjects(ctx, d.bucket, minio.ListObjectsOptions{
 		Prefix:    dirPrefix,
 		Recursive: false,
 		MaxKeys:   1,
-	}) {
+	})
+	if obj, ok := <-ch; ok {
 		if obj.Err != nil {
 			return api.FileInfo{}, obj.Err
 		}

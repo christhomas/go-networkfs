@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        go: ["1.24"]
+        go: ["stable"]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +48,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "stable"
           cache: true
 
       - name: gofmt
@@ -72,7 +72,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "stable"
           cache: true
 
       - name: install govulncheck
@@ -93,7 +93,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "stable"
           cache: true
 
       - name: build libftp.a

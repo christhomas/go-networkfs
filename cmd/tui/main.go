@@ -163,7 +163,6 @@ type model struct {
 	values         []string
 	fieldIdx       int
 
-
 	// browser
 	driver    api.Driver
 	mountID   int

@@ -149,8 +149,8 @@ func TestDbxPath(t *testing.T) {
 		{"/", ""},
 		{"/foo", "/foo"},
 		{"/foo/bar", "/foo/bar"},
-		{"foo", "/foo"},           // missing leading slash added
-		{"foo/bar", "/foo/bar"},   // missing leading slash added
+		{"foo", "/foo"},         // missing leading slash added
+		{"foo/bar", "/foo/bar"}, // missing leading slash added
 		{"/a/b/c.txt", "/a/b/c.txt"},
 	}
 	for _, c := range cases {
