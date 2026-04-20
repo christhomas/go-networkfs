@@ -31,6 +31,13 @@ linters:
       # filepath.SkipDir, etc.
       checks: ["SA*"]
 
+  exclusions:
+    rules:
+      # cgo //export functions legitimately live in package main and
+      # don't need individual godoc comments above each one.
+      - path: "cmd/.+/main.go"
+        text: "should have( a package)? comment"
+
 formatters:
   enable:
     - gofmt
@@ -39,10 +46,3 @@ issues:
   # Don't limit the issue count per linter — surface them all.
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # cgo //export functions legitimately live in package main and
-    # don't need individual godoc comments above each one.
-    - path: "cmd/.+/main.go"
-      text: "should have( a package)? comment"
-      linters: [revive]
