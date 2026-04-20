@@ -60,7 +60,7 @@ type DriverFactory func() Driver
 var registry = make(map[int]DriverFactory)
 
 // RegisterDriver registers a driver type with its factory
-// driverType: 1=FTP, 2=SFTP, 3=SMB, 4=Dropbox, 5=WebDAV, etc.
+// driverType: 1=FTP, 2=SFTP, 3=SMB, 4=Dropbox, 5=WebDAV, 6=GDrive, 7=S3, etc.
 func RegisterDriver(driverType int, factory DriverFactory) {
 	registry[driverType] = factory
 }
