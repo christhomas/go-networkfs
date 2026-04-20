@@ -47,12 +47,20 @@ func (d *FTPDriver) Name() string {
 	return "ftp"
 }
 
-// Mount establishes FTP connection
-// Config expects: host, port, user, pass, root, ftps
+// Mount establishes FTP connection.
+//
+// Config expects: host, port, user, pass, root, ftps.
+//
+// Errors are classified into human-readable categories so callers can
+// tell apart "host is wrong" from "credentials are wrong" from "remote
+// path doesn't exist" without parsing FTP server strings themselves.
+// The mount-time rootPath check is load-bearing: without it, a bad
+// root would only surface on the first listDir() call, which the
+// FileProvider shell catches and turns back into a generic error.
 func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
-	host, ok := config["host"]
-	if !ok {
-		return &api.DriverError{Code: 10, Message: "config missing 'host'"}
+	host := config["host"]
+	if host == "" {
+		return fmt.Errorf("missing required field 'host' in mount config")
 	}
 
 	user := config["user"]
@@ -68,7 +76,7 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return &api.DriverError{Code: 11, Message: "invalid port: " + portStr}
+		return fmt.Errorf("invalid port %q: must be an integer", portStr)
 	}
 
 	ftps := config["ftps"] == "true" || config["ftps"] == "1"
@@ -80,13 +88,87 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 	d.rootPath = rootPath
 	d.ftps = ftps
 
-	// Establish connection
 	if err := d.connect(); err != nil {
-		return &api.DriverError{Code: 12, Message: "connection failed: " + err.Error()}
+		return classifyFTPConnectError(err, host, port, user)
+	}
+
+	if _, err := d.client.List(rootPath); err != nil {
+		_ = d.client.Quit()
+		d.client = nil
+		return classifyFTPPathError(err, rootPath)
 	}
 
 	d.connected = true
 	return nil
+}
+
+// classifyFTPConnectError turns the raw dial/login error into a message
+// that names the likely cause (bad host, refused port, timeout, TLS
+// mismatch, bad credentials) instead of a generic "connection failed".
+// The original error is kept at the end for the log.
+func classifyFTPConnectError(err error, host string, port int, user string) error {
+	if err == nil {
+		return nil
+	}
+	if isFTPAuthError(err) {
+		who := user
+		if who == "" {
+			who = "anonymous"
+		}
+		return fmt.Errorf("authentication failed for user %q (check username/password): %v", who, err)
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "server misbehaving"),
+		strings.Contains(msg, "dns"):
+		return fmt.Errorf("cannot resolve host %q (check the hostname): %v", host, err)
+	case strings.Contains(msg, "connection refused"):
+		return fmt.Errorf("%s:%d refused the connection (is the FTP server running on that port?): %v", host, port, err)
+	case strings.Contains(msg, "i/o timeout"),
+		strings.Contains(msg, "deadline exceeded"):
+		return fmt.Errorf("timed out connecting to %s:%d (check host/port/firewall): %v", host, port, err)
+	case strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "network is unreachable"):
+		return fmt.Errorf("network unreachable for %s:%d: %v", host, port, err)
+	case strings.Contains(msg, "connection reset"):
+		return fmt.Errorf("%s:%d reset the connection (wrong port or TLS mismatch?): %v", host, port, err)
+	case strings.Contains(msg, "tls"),
+		strings.Contains(msg, "handshake"),
+		strings.Contains(msg, "x509"):
+		return fmt.Errorf("TLS handshake failed talking to %s:%d (check FTPS setting): %v", host, port, err)
+	default:
+		return fmt.Errorf("connection to %s:%d failed: %v", host, port, err)
+	}
+}
+
+// isFTPAuthError recognises the FTP auth-failed status codes.
+// 530 = "Not logged in", 532 = "Need account for storing files".
+func isFTPAuthError(err error) bool {
+	if te, ok := err.(*textproto.Error); ok {
+		return te.Code == 530 || te.Code == 532
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "530 ") ||
+		strings.Contains(strings.ToLower(msg), "login incorrect")
+}
+
+// classifyFTPPathError maps the error from listing the remote root
+// directory onto "path doesn't exist" / "permission denied" / generic.
+func classifyFTPPathError(err error, path string) error {
+	if te, ok := err.(*textproto.Error); ok {
+		switch te.Code {
+		case 550:
+			return fmt.Errorf("remote path %q does not exist or is not accessible: %v", path, err)
+		case 530:
+			return fmt.Errorf("authentication required to access %q: %v", path, err)
+		}
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "550 ") {
+		return fmt.Errorf("remote path %q does not exist or is not accessible: %v", path, err)
+	}
+	return fmt.Errorf("failed to access remote path %q: %v", path, err)
 }
 
 func (d *FTPDriver) connect() error {

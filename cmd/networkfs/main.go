@@ -29,6 +29,7 @@ import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"unsafe"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
@@ -103,18 +104,25 @@ func networkfs_version() *C.char {
 // mountID: unique identifier for this mount instance
 // driverType: 1=FTP, 2=SFTP, 3=SMB, 4=Dropbox, 5=WebDAV, 6=GDrive, 7=S3
 // configJSON: driver-specific config, e.g. {"host":"...","user":"...",...}
+// outErr: on non-zero return, receives a human-readable, classified error
+// message (e.g. "cannot resolve host", "authentication failed", "remote path
+// does not exist"). Caller must free with networkfs_free. On success, *outErr
+// is left untouched; callers should initialise it to NULL.
 // Returns: 0 on success, 1 on unknown driver type, 2 on mount failure, -1 on invalid JSON
 //
 //export networkfs_mount
-func networkfs_mount(mountID C.int, driverType C.int, configJSON *C.char) C.int {
+func networkfs_mount(mountID C.int, driverType C.int, configJSON *C.char, outErr **C.char) C.int {
 	config := make(map[string]string)
 	if err := jsonFromC(configJSON, &config); err != nil {
+		setOutString(outErr, "invalid config JSON: "+err.Error())
 		return -1
 	}
 	if err := manager.Mount(int(mountID), int(driverType), config); err != nil {
 		if err == api.ErrUnknownDriverType {
+			setOutString(outErr, fmt.Sprintf("unknown driver type: %d", int(driverType)))
 			return 1
 		}
+		setOutString(outErr, err.Error())
 		return 2
 	}
 	return 0
