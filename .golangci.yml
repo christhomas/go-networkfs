@@ -1,36 +1,48 @@
-# golangci-lint configuration.
+# golangci-lint v2 configuration.
 #
 # Conservative set — catches real bugs without shouting about style.
 # We can always tighten later.
+
+version: "2"
 
 run:
   timeout: 3m
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - govet         # includes shadow, printf, structtag, etc.
     - ineffassign   # assignments whose value is never used
     - staticcheck   # the big one; broad correctness checks
-    - gosimple      # obvious simplifications
-    - gofmt         # formatting
     - misspell      # typos in comments and strings
 
-  # errcheck was flagging ~30 idiomatic cleanup calls like
-  # defer conn.Close() / client.Quit() / d.Unmount() / fmt.Sscanf on
-  # opportunistic parses — all standard Go patterns where the error
-  # is intentionally unchecked. Rather than spray `_ =` everywhere,
-  # we rely on staticcheck (SA5001 etc.) to catch genuinely-suspicious
-  # ignores while accepting the rest.
-  #
-  # unused was flagging helpers (nameFromPath in ftp/sftp) that are
-  # referenced transitively or kept for future use. Not worth hunting.
+  # errcheck + unused were flagging idiomatic patterns (defer conn.Close,
+  # fmt.Sscanf on opportunistic parses, helpers kept for future reach).
+  # Rely on staticcheck to flag genuinely-suspicious cases.
+
+  settings:
+    staticcheck:
+      # Only the SA* bug-catching family. The ST* (stylecheck),
+      # S* (simple), and QF* (quickfix) groups produce a lot of
+      # noise on upstream cgo-heavy driver code that we don't want
+      # to relitigate — //export names use underscores, error
+      # strings are sentence-cased, pkg/fsutil.SkipDir mirrors
+      # filepath.SkipDir, etc.
+      checks: ["SA*"]
+
+formatters:
+  enable:
+    - gofmt
 
 issues:
+  # Don't limit the issue count per linter — surface them all.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
   exclude-rules:
-    # cgo //export functions legitimately live in package main and don't
-    # need individual godoc comments above each one.
+    # cgo //export functions legitimately live in package main and
+    # don't need individual godoc comments above each one.
     - path: "cmd/.+/main.go"
       text: "should have( a package)? comment"
-      linters: [revive, golint]
+      linters: [revive]
