@@ -15,6 +15,7 @@ package onedrive
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -465,5 +466,137 @@ func TestMountMissingConfig(t *testing.T) {
 	}
 	if d.connected {
 		t.Error("driver reports connected=true after failed Mount")
+	}
+}
+
+// --- newHTTPError baseline tests ----------------------------------------
+//
+// Pins the current contract of newHTTPError before any refactor. The
+// function reads the Response body, closes it, and maps the status to
+// either a known api sentinel (404 / 403 / 409) or a formatted
+// fallback that includes the trimmed body. These tests exercise each
+// branch via synthetic *http.Response values — no network.
+
+func fakeResp(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestNewHTTPErrorSentinelMappings(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   error
+	}{
+		{404, "not found", api.ErrNotFound},
+		{403, "forbidden", api.ErrPermissionDenied},
+		{409, "name conflict", api.ErrExists},
+	}
+	for _, c := range cases {
+		got := newHTTPError(fakeResp(c.status, c.body))
+		if got != c.want {
+			t.Errorf("status=%d body=%q: got %v, want %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
+func TestNewHTTPErrorFallbackIncludesStatusAndBody(t *testing.T) {
+	got := newHTTPError(fakeResp(500, "  internal server error\n"))
+	if got == nil {
+		t.Fatal("expected non-nil error for 500")
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, "500") {
+		t.Errorf("error message missing status: %q", msg)
+	}
+	// Body must be trimmed of surrounding whitespace/newlines.
+	if !strings.Contains(msg, "internal server error") {
+		t.Errorf("error message missing body text: %q", msg)
+	}
+	if strings.Contains(msg, "  internal") || strings.HasSuffix(msg, "\n") {
+		t.Errorf("body not trimmed: %q", msg)
+	}
+}
+
+func TestNewHTTPErrorFallbackOnEmptyBody(t *testing.T) {
+	got := newHTTPError(fakeResp(418, ""))
+	if got == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if !strings.Contains(got.Error(), "418") {
+		t.Errorf("status missing: %q", got.Error())
+	}
+}
+
+func TestNewHTTPErrorFallbackOnUnmappedClientErrors(t *testing.T) {
+	// 4xx codes that aren't mapped to sentinels (400, 401, 429) fall
+	// through to the formatted fallback so higher-level code still
+	// sees the status + body.
+	for _, status := range []int{400, 401, 405, 429} {
+		got := newHTTPError(fakeResp(status, "ohno"))
+		if got == api.ErrNotFound || got == api.ErrPermissionDenied || got == api.ErrExists {
+			t.Errorf("status=%d: got sentinel %v, want formatted fallback", status, got)
+		}
+	}
+}
+
+// --- mapHTTPError (pure kernel) -----------------------------------------
+//
+// mapHTTPError is what newHTTPError delegates to after reading+closing
+// the response body. Testing it directly removes the need to construct
+// *http.Response values and makes every branch trivially reachable.
+
+func TestMapHTTPErrorSentinels(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		{404, api.ErrNotFound},
+		{403, api.ErrPermissionDenied},
+		{409, api.ErrExists},
+	}
+	for _, c := range cases {
+		got := mapHTTPError(c.status, []byte("ignored"))
+		if got != c.want {
+			t.Errorf("mapHTTPError(%d) = %v, want %v", c.status, got, c.want)
+		}
+	}
+}
+
+func TestMapHTTPErrorFallbackTrimsBody(t *testing.T) {
+	got := mapHTTPError(500, []byte("  boom\n\t"))
+	if got == nil {
+		t.Fatal("nil error")
+	}
+	// Trimmed: no leading spaces, no trailing newline/tab.
+	if !strings.Contains(got.Error(), "boom") {
+		t.Errorf("missing body: %q", got.Error())
+	}
+	if strings.Contains(got.Error(), "  boom") || strings.HasSuffix(got.Error(), "\t") {
+		t.Errorf("body not trimmed: %q", got.Error())
+	}
+}
+
+func TestMapHTTPErrorFallbackOnNilBody(t *testing.T) {
+	got := mapHTTPError(418, nil)
+	if got == nil {
+		t.Fatal("nil error")
+	}
+	if !strings.Contains(got.Error(), "418") {
+		t.Errorf("status missing from fallback: %q", got.Error())
+	}
+}
+
+// Every non-sentinel status must yield a non-sentinel error so
+// callers can distinguish "expected" (ErrNotFound etc.) from
+// "arbitrary HTTP failure".
+func TestMapHTTPErrorNonSentinelIsNotSentinel(t *testing.T) {
+	for _, status := range []int{200, 301, 400, 401, 405, 429, 500, 502, 503, 504} {
+		got := mapHTTPError(status, []byte("x"))
+		if got == api.ErrNotFound || got == api.ErrPermissionDenied || got == api.ErrExists {
+			t.Errorf("status=%d returned sentinel %v", status, got)
+		}
 	}
 }

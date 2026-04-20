@@ -615,7 +615,17 @@ func backoff(attempt int) {
 func newHTTPError(resp *http.Response) error {
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	switch resp.StatusCode {
+	return mapHTTPError(resp.StatusCode, b)
+}
+
+// mapHTTPError is the pure core of newHTTPError: given a status code
+// and the response body bytes, it returns the corresponding api
+// sentinel (404 / 403 / 409) or a formatted fallback. Broken out so
+// tests don't have to synthesise *http.Response values and other
+// drivers (gdrive, webdav) could adopt the same mapping without
+// duplicating the switch.
+func mapHTTPError(status int, body []byte) error {
+	switch status {
 	case 404:
 		return api.ErrNotFound
 	case 403:
@@ -623,7 +633,7 @@ func newHTTPError(resp *http.Response) error {
 	case 409:
 		return api.ErrExists
 	}
-	return fmt.Errorf("onedrive: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	return fmt.Errorf("onedrive: HTTP %d: %s", status, strings.TrimSpace(string(body)))
 }
 
 // --- path helpers ---------------------------------------------------------
