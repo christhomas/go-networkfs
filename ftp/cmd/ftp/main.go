@@ -1,12 +1,23 @@
 // ftp/cmd/ftp/main.go - FTP driver C library exports
 //
 // Builds as: go build -buildmode=c-archive -o libftp.a ./ftp/cmd/ftp
-// Exports: ftp_mount, ftp_unmount, ftp_stat, ftp_listdir, ftp_readfile...
+// Exports: ftp_version, ftp_mount, ftp_unmount, ftp_stat, ftp_listdir,
+// ftp_openfile, ftp_writefile, ftp_mkdir, ftp_remove, ftp_rename,
+// ftp_free.
+//
+// NOTE: cgo marshaling helpers (StringFromC, JSONToC, SetOutString, …)
+// are intentionally inlined here rather than imported from
+// github.com/christhomas/go-networkfs/pkg/api/cgo. When cgo helpers
+// are defined in a separate package, their `C.char` becomes a named
+// type scoped to that package — not assignable to `*C.char` in any
+// other package's main. The only portable way to share cgo glue is
+// to copy it per-binary; that's what we do here.
 
 package main
 
 /*
 #include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
 
 typedef struct {
@@ -17,17 +28,66 @@ typedef struct {
 import "C"
 
 import (
+	"encoding/json"
 	"unsafe"
 
 	"github.com/christhomas/go-networkfs/ftp"
-	"github.com/christhomas/go-networkfs/pkg/api/cgo"
 )
 
 var driver = &ftp.FTPDriver{}
 
+// --- local cgo marshaling helpers (see NOTE above) -------------------------
+
+func stringFromC(cstr *C.char) string {
+	if cstr == nil {
+		return ""
+	}
+	return C.GoString(cstr)
+}
+
+func jsonFromC(cstr *C.char, v interface{}) error {
+	return json.Unmarshal([]byte(stringFromC(cstr)), v)
+}
+
+func stringToC(s string) *C.char {
+	return C.CString(s)
+}
+
+func jsonToC(v interface{}) *C.char {
+	data, err := json.Marshal(v)
+	if err != nil {
+		errData, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return C.CString(string(errData))
+	}
+	return C.CString(string(data))
+}
+
+func errorToC(err error) *C.char {
+	if err == nil {
+		return nil
+	}
+	return C.CString(err.Error())
+}
+
+func setOutString(out **C.char, s string) {
+	*out = C.CString(s)
+}
+
+func setOutBytes(outData **C.char, outLen *C.size_t, data []byte) {
+	if len(data) == 0 {
+		*outData = nil
+		*outLen = 0
+		return
+	}
+	*outData = (*C.char)(C.CBytes(data))
+	*outLen = C.size_t(len(data))
+}
+
+// --- exports ---------------------------------------------------------------
+
 //export ftp_version
 func ftp_version() *C.char {
-	return cgo.StringToC("1.0.0")
+	return stringToC("1.0.0")
 }
 
 // mountID: unique identifier for this mount instance
@@ -37,7 +97,7 @@ func ftp_version() *C.char {
 //export ftp_mount
 func ftp_mount(mountID C.int, configJSON *C.char) C.int {
 	config := make(map[string]string)
-	if err := cgo.JSONFromC(configJSON, &config); err != nil {
+	if err := jsonFromC(configJSON, &config); err != nil {
 		return -1 // Invalid JSON
 	}
 	if err := driver.Mount(int(mountID), config); err != nil {
@@ -58,12 +118,12 @@ func ftp_unmount(mountID C.int) C.int {
 //
 //export ftp_stat
 func ftp_stat(mountID C.int, path *C.char, outJSON **C.char) C.int {
-	info, err := driver.Stat(int(mountID), cgo.StringFromC(path))
+	info, err := driver.Stat(int(mountID), stringFromC(path))
 	if err != nil {
-		cgo.SetOutString(outJSON, cgo.ErrorToC(err))
+		setOutString(outJSON, C.GoString(errorToC(err)))
 		return 1
 	}
-	cgo.SetOutString(outJSON, string(cgo.JSONToC(info)))
+	*outJSON = jsonToC(info)
 	return 0
 }
 
@@ -71,12 +131,12 @@ func ftp_stat(mountID C.int, path *C.char, outJSON **C.char) C.int {
 //
 //export ftp_listdir
 func ftp_listdir(mountID C.int, path *C.char, outJSON **C.char) C.int {
-	entries, err := driver.ListDir(int(mountID), cgo.StringFromC(path))
+	entries, err := driver.ListDir(int(mountID), stringFromC(path))
 	if err != nil {
-		cgo.SetOutString(outJSON, cgo.ErrorToC(err))
+		setOutString(outJSON, C.GoString(errorToC(err)))
 		return 1
 	}
-	cgo.SetOutString(outJSON, string(cgo.JSONToC(entries)))
+	*outJSON = jsonToC(entries)
 	return 0
 }
 
@@ -84,7 +144,7 @@ func ftp_listdir(mountID C.int, path *C.char, outJSON **C.char) C.int {
 //
 //export ftp_openfile
 func ftp_openfile(mountID C.int, path *C.char, out *C.ByteSlice) C.int {
-	reader, err := driver.OpenFile(int(mountID), cgo.StringFromC(path))
+	reader, err := driver.OpenFile(int(mountID), stringFromC(path))
 	if err != nil {
 		return 1
 	}
@@ -102,7 +162,7 @@ func ftp_openfile(mountID C.int, path *C.char, out *C.ByteSlice) C.int {
 		}
 	}
 
-	cgo.SetOutBytes(&out.data, &out.len, data)
+	setOutBytes(&out.data, &out.len, data)
 	return 0
 }
 
@@ -111,7 +171,7 @@ func ftp_openfile(mountID C.int, path *C.char, out *C.ByteSlice) C.int {
 //
 //export ftp_writefile
 func ftp_writefile(mountID C.int, path *C.char, data C.ByteSlice) C.int {
-	writer, err := driver.CreateFile(int(mountID), cgo.StringFromC(path))
+	writer, err := driver.CreateFile(int(mountID), stringFromC(path))
 	if err != nil {
 		return 1
 	}
@@ -126,7 +186,7 @@ func ftp_writefile(mountID C.int, path *C.char, data C.ByteSlice) C.int {
 
 //export ftp_mkdir
 func ftp_mkdir(mountID C.int, path *C.char) C.int {
-	if err := driver.Mkdir(int(mountID), cgo.StringFromC(path)); err != nil {
+	if err := driver.Mkdir(int(mountID), stringFromC(path)); err != nil {
 		return 1
 	}
 	return 0
@@ -134,7 +194,7 @@ func ftp_mkdir(mountID C.int, path *C.char) C.int {
 
 //export ftp_remove
 func ftp_remove(mountID C.int, path *C.char) C.int {
-	if err := driver.Remove(int(mountID), cgo.StringFromC(path)); err != nil {
+	if err := driver.Remove(int(mountID), stringFromC(path)); err != nil {
 		return 1
 	}
 	return 0
@@ -142,17 +202,20 @@ func ftp_remove(mountID C.int, path *C.char) C.int {
 
 //export ftp_rename
 func ftp_rename(mountID C.int, oldPath *C.char, newPath *C.char) C.int {
-	if err := driver.Rename(int(mountID), cgo.StringFromC(oldPath), cgo.StringFromC(newPath)); err != nil {
+	if err := driver.Rename(int(mountID), stringFromC(oldPath), stringFromC(newPath)); err != nil {
 		return 1
 	}
 	return 0
 }
 
-// Frees memory allocated by ftp_stat, ftp_listdir, ftp_openfile
+// Frees memory allocated by ftp_stat, ftp_listdir, ftp_openfile,
+// ftp_writefile, ftp_version. Safe to call with NULL.
 //
 //export ftp_free
 func ftp_free(ptr *C.char) {
-	cgo.FreeBytes(ptr)
+	if ptr != nil {
+		C.free(unsafe.Pointer(ptr))
+	}
 }
 
 func main() {}

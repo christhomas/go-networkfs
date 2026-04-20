@@ -51,7 +51,7 @@ func (d *FTPDriver) Name() string {
 func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 	host, ok := config["host"]
 	if !ok {
-		return api.DriverError{Code: 10, Message: "config missing 'host'"}
+		return &api.DriverError{Code: 10, Message: "config missing 'host'"}
 	}
 
 	user := config["user"]
@@ -67,7 +67,7 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return api.DriverError{Code: 11, Message: "invalid port: " + portStr}
+		return &api.DriverError{Code: 11, Message: "invalid port: " + portStr}
 	}
 
 	ftps := config["ftps"] == "true" || config["ftps"] == "1"
@@ -81,7 +81,7 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 
 	// Establish connection
 	if err := d.connect(); err != nil {
-		return api.DriverError{Code: 12, Message: "connection failed: " + err.Error()}
+		return &api.DriverError{Code: 12, Message: "connection failed: " + err.Error()}
 	}
 
 	d.connected = true
