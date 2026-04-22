@@ -194,6 +194,18 @@ make vet             # go vet
 make tidy            # go mod tidy && go mod verify
 ```
 
+### Git hooks
+
+One-time setup per clone, so every commit runs `gofmt -s` + `go vet`
+(the fast subset of CI) and CI doesn't have to catch what your machine
+could have:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+Bypass a single commit with `git commit --no-verify`.
+
 CI runs tests (with race detector), `go vet`, `gofmt -s`,
 `golangci-lint`, `govulncheck`, and all c-archive + TUI builds on every
 push and pull request (ubuntu-latest + macos-latest matrix).
