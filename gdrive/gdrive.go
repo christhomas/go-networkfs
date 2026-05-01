@@ -46,11 +46,18 @@ type GDriveDriver struct {
 	accessToken string
 
 	httpClient *http.Client
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 
 	// path -> Drive file ID cache. Seeded with root aliases.
 	cacheMu   sync.Mutex
 	pathCache map[string]string
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *GDriveDriver) Stats() *api.MountStats { return d.stats }
 
 // Name returns the driver identifier.
 func (d *GDriveDriver) Name() string {
@@ -78,7 +85,8 @@ func (d *GDriveDriver) Mount(mountID int, config map[string]string) error {
 	d.clientSecret = clientSecret
 	d.refreshToken = refreshToken
 	d.accessToken = config["access_token"]
-	d.httpClient = &http.Client{Timeout: 30 * time.Second}
+	d.stats = &api.MountStats{}
+	d.httpClient = api.WrapHTTPClient(&http.Client{Timeout: 30 * time.Second}, d.stats)
 	d.pathCache = map[string]string{"/": "root", "": "root"}
 
 	if d.accessToken == "" {

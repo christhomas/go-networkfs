@@ -53,6 +53,20 @@ type Driver interface {
 	Rename(mountID int, oldPath, newPath string) error
 }
 
+// Thumbnailer is an optional capability — drivers that can produce
+// a thumbnail image for a remote file (cloud providers with
+// thumbnail HTTP endpoints) implement this. The dispatcher type-
+// asserts on it; drivers that don't implement it return a clear
+// "not supported" from the C ABI.
+type Thumbnailer interface {
+	// GetThumbnail returns a JPEG/PNG byte slice for `path`,
+	// sized so that the long edge is approximately `sizePx` px.
+	// Implementations should pick the smallest provider-supported
+	// bucket >= sizePx (e.g. Dropbox's 32/64/128/256/480/640/960
+	// /1024/2048 buckets).
+	GetThumbnail(mountID int, path string, sizePx int) ([]byte, error)
+}
+
 // DriverFactory creates new Driver instances
 type DriverFactory func() Driver
 
@@ -118,6 +132,23 @@ func (m *MountManager) Unmount(mountID int) error {
 func (m *MountManager) Get(mountID int) (Driver, bool) {
 	d, ok := m.mounts[mountID]
 	return d, ok
+}
+
+// Stats returns the per-mount transport counters for `mountID`, or
+// nil when the mount doesn't exist or its driver doesn't implement
+// StatsProvider (FTP/SFTP/SMB today). Callers should treat a nil
+// return as "all zeros" — the C ABI does this so non-HTTP mounts
+// surface harmless empty snapshots instead of errors.
+func (m *MountManager) Stats(mountID int) *MountStats {
+	d, ok := m.mounts[mountID]
+	if !ok {
+		return nil
+	}
+	sp, ok := d.(StatsProvider)
+	if !ok {
+		return nil
+	}
+	return sp.Stats()
 }
 
 // Common errors

@@ -62,9 +62,16 @@ type OneDriveDriver struct {
 
 	httpClient *http.Client
 	connected  bool
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 }
 
 func (d *OneDriveDriver) Name() string { return "onedrive" }
+
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *OneDriveDriver) Stats() *api.MountStats { return d.stats }
 
 // Mount validates config and obtains an initial access token.
 //
@@ -81,7 +88,8 @@ func (d *OneDriveDriver) Mount(mountID int, config map[string]string) error {
 		return &api.DriverError{Code: 10, Message: "onedrive: client_id and refresh_token are required"}
 	}
 
-	d.httpClient = &http.Client{Timeout: 60 * time.Second}
+	d.stats = &api.MountStats{}
+	d.httpClient = api.WrapHTTPClient(&http.Client{Timeout: 60 * time.Second}, d.stats)
 	if err := d.refresh(context.Background()); err != nil {
 		return &api.DriverError{Code: 12, Message: "onedrive: initial token refresh failed: " + err.Error()}
 	}

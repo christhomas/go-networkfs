@@ -3,7 +3,8 @@
 // Builds as: go build -buildmode=c-archive -o libnetworkfs.a ./cmd/networkfs
 // Exports: networkfs_version, networkfs_mount, networkfs_unmount,
 // networkfs_stat, networkfs_listdir, networkfs_openfile, networkfs_writefile,
-// networkfs_mkdir, networkfs_remove, networkfs_rename, networkfs_free.
+// networkfs_mkdir, networkfs_remove, networkfs_rename, networkfs_get_thumbnail,
+// networkfs_free.
 //
 // Unlike the per-driver libraries (libftp.a, libsftp.a, etc.), this archive
 // links every registered driver and dispatches by driver_type at mount time.
@@ -168,6 +169,14 @@ func networkfs_listdir(mountID C.int, path *C.char, outJSON **C.char) C.int {
 		setOutString(outJSON, C.GoString(errorToC(err)))
 		return 1
 	}
+	// Empty directories: drivers that return a nil slice (OneDrive,
+	// possibly others) would otherwise marshal to JSON `null`, which
+	// the Swift caller's `[RemoteFileInfo]` decoder rejects with
+	// "Expected Array but found null". Normalise nil → [] so the C
+	// ABI contract ("JSON array of FileInfo") holds for every driver.
+	if entries == nil {
+		entries = []api.FileInfo{}
+	}
 	*outJSON = jsonToC(entries)
 	return 0
 }
@@ -260,11 +269,75 @@ func networkfs_rename(mountID C.int, oldPath *C.char, newPath *C.char) C.int {
 	return 0
 }
 
+// Returns thumbnail bytes via out (caller must free out.data with
+// networkfs_free). On non-zero return, *outErr carries a
+// human-readable message (caller frees with networkfs_free).
+//
+//export networkfs_get_thumbnail
+func networkfs_get_thumbnail(mountID C.int, path *C.char, sizePx C.int,
+	out *C.ByteSlice, outErr **C.char) C.int {
+	driver, ok := manager.Get(int(mountID))
+	if !ok {
+		setOutString(outErr, "mount not found")
+		return 1
+	}
+	t, ok := driver.(api.Thumbnailer)
+	if !ok {
+		setOutString(outErr, "driver does not support thumbnails")
+		return 2
+	}
+	data, err := t.GetThumbnail(int(mountID), stringFromC(path), int(sizePx))
+	if err != nil {
+		setOutString(outErr, err.Error())
+		return 3
+	}
+	setOutBytes(&out.data, &out.len, data)
+	return 0
+}
+
 // Returns JSON array of registered driver type IDs (caller must free with networkfs_free)
 //
 //export networkfs_drivers
 func networkfs_drivers(outJSON **C.char) C.int {
 	*outJSON = jsonToC(api.ListDriverTypes())
+	return 0
+}
+
+// Returns a JSON object with this mount's transport byte/op counters
+// (caller must free `outJSON` with networkfs_free):
+//
+//	{
+//	  "bytes_read":    <uint64>,  // response body bytes received
+//	  "bytes_written": <uint64>,  // request body bytes sent
+//	  "ops_read":      <uint64>,  // completed responses
+//	  "ops_written":   <uint64>   // issued requests
+//	}
+//
+// Returns all-zero counters when:
+//   - the mount doesn't exist (still returns 0, *not* an error, so the
+//     1 Hz Swift poller doesn't spam errors during teardown), or
+//   - the driver is non-HTTP (FTP/SFTP/SMB) and so doesn't implement
+//     api.StatsProvider.
+//
+//export networkfs_get_stats
+func networkfs_get_stats(mountID C.int32_t, outJSON **C.char) C.int {
+	stats := manager.Stats(int(mountID))
+	if stats == nil {
+		*outJSON = jsonToC(map[string]uint64{
+			"bytes_read":    0,
+			"bytes_written": 0,
+			"ops_read":      0,
+			"ops_written":   0,
+		})
+		return 0
+	}
+	br, bw, or, ow := stats.Snapshot()
+	*outJSON = jsonToC(map[string]uint64{
+		"bytes_read":    br,
+		"bytes_written": bw,
+		"ops_read":      or,
+		"ops_written":   ow,
+	})
 	return 0
 }
 
