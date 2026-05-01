@@ -19,6 +19,9 @@ ISO-8601. Changes under `Unreleased` haven't been tagged yet.
 - **Examples updated** to blank-import all eight drivers so
   `examples/list`, `examples/upload`, and `examples/walk` work against
   every registered driver type at runtime.
+- **MIT LICENSE file** added to repo root, matching the licence
+  declared in `README.md`. No code changes; resolves the missing
+  LICENSE flagged by downstream IP review.
 
 ## 0.2.0-dev — pre-merge my-work history
 
