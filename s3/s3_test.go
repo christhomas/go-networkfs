@@ -284,3 +284,19 @@ func TestUnmountUnmounted(t *testing.T) {
 		t.Errorf("Stat after Unmount: want ErrNotConnected, got %v", err)
 	}
 }
+
+// Stats() on a never-mounted driver returns nil. After Mount() the
+// driver allocates a *MountStats and exposes it via the same accessor;
+// the host-side stats collector relies on Stats() returning the *same*
+// pointer for the lifetime of the mount so it can keep absorbing the
+// monotonic counter without re-fetching.
+func TestStatsBeforeMount(t *testing.T) {
+	d := &S3Driver{}
+	if d.Stats() != nil {
+		t.Fatalf("Stats() before Mount = %p, want nil", d.Stats())
+	}
+}
+
+// Compile-time guard that S3Driver satisfies api.StatsProvider so a
+// future refactor can't silently drop the per-mount byte counters.
+var _ api.StatsProvider = (*S3Driver)(nil)
