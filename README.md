@@ -411,20 +411,20 @@ serialisation, success/error result shapes) that the mains can safely
 call. Anything involving `*C.char` — string conversion, byte-slice
 pointers, free — has to stay inline in each main.
 
-## Integration with DiskJockey
+## Embedding via cgo (host integration)
 
-Vendored as a git submodule:
+Vendor as a git submodule (or vendor directly — both work):
 
 ```bash
-cd diskjockey
 git submodule add https://github.com/christhomas/go-networkfs.git vendor/go-networkfs
 ```
 
-`scripts/build-gonetworkfs.sh` produces all per-driver libs and the
-combined `libnetworkfs.a` into `lib/go-networkfs/`. Drivers are
-controlled via the `DRIVERS` env var (default: `ftp sftp smb dropbox
-webdav gdrive s3`). Set `BUILD_COMBINED=0` to skip the combined
-archive. Set `DJ_GO_DEBUG=1` to preserve symbols and DWARF info.
+The included `scripts/build-gonetworkfs.sh` produces all per-driver
+libs and the combined `libnetworkfs.a` into a configurable output
+directory. Drivers are controlled via the `DRIVERS` env var (default:
+`ftp sftp smb dropbox webdav gdrive s3`). Set `BUILD_COMBINED=0` to
+skip the combined archive. Set `GO_NETWORKFS_DEBUG=1` to preserve
+symbols and DWARF info for debugging from the host side.
 
 ## CI
 
