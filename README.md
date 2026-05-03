@@ -5,8 +5,7 @@ Google Drive, S3, OneDrive — behind one Go interface (`api.Driver`).
 Builds either as a Go library or as `c-archive` static `.a` files (one
 per driver, plus a combined `libnetworkfs.a` dispatcher) for embedding
 in Swift, Objective-C, C++, or any language that speaks cgo. MIT
-licensed — see [LICENSE](LICENSE) and the per-dependency inventory in
-the dependency inventory.
+licensed — see [LICENSE](LICENSE).
 
 ## Drivers
 
@@ -223,11 +222,9 @@ the curated history):
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for the project license and
-the dependency inventory for the full per-dependency
-license inventory (every direct and transitive dep is permissive —
-MIT / BSD-2 / BSD-3 / ISC / Apache-2.0 / weak-copyleft MPL-2.0; no GPL
-anywhere).
+MIT. See [LICENSE](LICENSE) for the project license. Every direct
+and transitive dep is permissive — MIT / BSD-2 / BSD-3 / ISC /
+Apache-2.0 / weak-copyleft MPL-2.0; no GPL anywhere.
 
 ## Building
 
@@ -445,4 +442,3 @@ locally — `gofmt -s` + `go vet`. Bypass with `git commit --no-verify`.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — prioritised plan of what's next
 - [docs/DRIVERS.md](docs/DRIVERS.md) — how to write a new driver
 - [CHANGELOG.md](CHANGELOG.md) — notable changes
-- the dependency inventory — full license inventory
