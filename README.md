@@ -23,12 +23,26 @@ licensed — see [LICENSE](LICENSE).
 All drivers implement `Mount`, `Unmount`, `Stat`, `ListDir`, `OpenFile`,
 `CreateFile`, `Mkdir`, `Remove`, `Rename`. Optional capabilities:
 
-- **`Thumbnailer`** — Dropbox only today. Returns provider-rendered
-  JPEG/PNG thumbnails in size buckets (32/64/128/256/480/640/960/1024/2048 px).
-- **`StatsProvider`** — Dropbox / GDrive / OneDrive (HTTP-based drivers)
-  expose per-mount byte/op counters via the shared `CountingTransport`.
-  FTP/SFTP/SMB/S3/WebDAV don't yet implement it; callers see harmless
-  zero snapshots instead of errors.
+- **`Thumbnailer`** — Dropbox / Google Drive / OneDrive. Each driver hits
+  the provider's native thumbnail endpoint (Dropbox `get_thumbnail_v2`,
+  GDrive `thumbnailLink` CDN URL with `=s<px>` resize, OneDrive
+  `/items/{id}/thumbnails`) and never downloads the source file. Size
+  buckets follow Dropbox's enum (32/64/128/256/480/640/960/1024/2048 px);
+  drivers map the requested size onto the closest provider bucket.
+  FTP/SFTP/SMB/WebDAV/S3 deliberately don't implement `Thumbnailer` —
+  these protocols have no native thumbnail API and the driver layer
+  refuses to lie about that. Consumers can layer client-side thumbnail
+  generation on top of cached file bytes if they want thumbnails for
+  those protocols.
+- **`StatsProvider`** — every driver. HTTP-based drivers (Dropbox /
+  GDrive / OneDrive / WebDAV / S3) wire the shared `CountingTransport`
+  into their `*http.Client`. Socket-based drivers (FTP / SFTP / SMB)
+  inject a `CountingConn` net.Conn wrapper at dial time so byte counts
+  reflect what's actually on the wire (FTPS ciphertext included). Op
+  semantics differ slightly: HTTP transports count request/response
+  pairs; socket transports count Read/Write syscalls. Surfaced through
+  `MountManager.Stats(mountID)` and `networkfs_get_stats(mountID)` in
+  the C ABI.
 
 ### Configuration keys
 
@@ -47,11 +61,14 @@ Passed to `Mount` as `map[string]string` (Go) or a JSON object (C ABI).
 
 ## Features
 
-**Transport-level (HTTP drivers):**
+**Transport-level:**
 - `pkg/api/CountingTransport` — `http.RoundTripper` wrapper that tallies
-  request/response body bytes and op counts atomically per mount.
-  Surfaced through `MountManager.Stats(mountID)` and
-  `networkfs_get_stats(mountID)` in the C ABI.
+  request/response body bytes and op counts atomically per mount. Used
+  by the five HTTP-based drivers.
+- `pkg/api/CountingConn` — `net.Conn` wrapper providing the same atomic
+  byte/op counters for the three socket-based drivers (FTP/SFTP/SMB).
+  Wraps the raw TCP conn before any TLS or SSH layer, so byte counts
+  match what an external network monitor would see.
 - HTTP token refresh built into `gdrive` and `onedrive`: proactive
   refresh based on the `expires_in` window plus reactive retry on
   401 with an in-flight body buffer so the retried request matches
@@ -64,7 +81,8 @@ Passed to `Mount` as `map[string]string` (Go) or a JSON object (C ABI).
   `io.WriteCloser` for SFTP / SMB / WebDAV / S3.
 - OneDrive `createUploadSession` for files larger than the simple PUT
   ceiling (chunked PUTs with `Content-Range`, retry per chunk).
-- Dropbox provider-side thumbnails via the `Thumbnailer` capability.
+- Provider-native thumbnails via the `Thumbnailer` capability for
+  Dropbox / Google Drive / OneDrive — never downloads the source file.
 - FTPS verifies against system roots by default (no silent
   `InsecureSkipVerify`); `MinVersion` pinned to TLS 1.2.
 - SFTP enforces `known_hosts` strict checking unless
@@ -111,8 +129,6 @@ Passed to `Mount` as `map[string]string` (Go) or a JSON object (C ABI).
   `Range:`); the interface just doesn't expose it yet.
 - **Connection pooling** — drivers serialise on a single connection per
   mount. Fine for the TUI; pathological for parallel walks. ROADMAP §12.
-- **`StatsProvider` on FTP/SFTP/SMB/S3/WebDAV** — only the HTTP-direct
-  drivers (Dropbox, GDrive, OneDrive) emit byte counters today.
 - **GDrive integration tests** against a fake — only unit tests on pure
   helpers. ROADMAP §11.
 - **Symlinks, free-space queries, checksums, atomic
@@ -199,6 +215,9 @@ Recent commits (most recent first; see [CHANGELOG.md](CHANGELOG.md) for
 the curated history):
 
 ```
+2026-05-03 -------- feat(transport): CountingConn — net.Conn byte/op counters for FTP/SFTP/SMB
+2026-05-03 -------- feat(stats): WebDAV + S3 wrap their http.Client with CountingTransport
+2026-05-03 -------- feat(thumbnails): GDrive thumbnailLink + OneDrive /thumbnails endpoint
 2026-05-01 61771fc feat(transport): per-mount HTTP byte counters via CountingTransport
 2026-05-01 ef6a67e docs: add MIT LICENSE file
 2026-04-22 4ba9364 ci: add pre-commit hook (gofmt -s + go vet)
