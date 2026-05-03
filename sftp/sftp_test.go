@@ -360,6 +360,38 @@ func TestIntegrationWrongPassword(t *testing.T) {
 	}
 }
 
+// TestIntegrationStatsCounted runs ListDir against the embedded SSH +
+// SFTP server and confirms the per-mount byte counters were incremented
+// in both directions. We count *encrypted* bytes (the conn is wrapped
+// before SSH negotiation), so SSH version banner + key-exchange traffic
+// alone guarantees non-zero counters even before any SFTP op.
+func TestIntegrationStatsCounted(t *testing.T) {
+	srv := startSFTPServer(t)
+	d := mount(t, srv)
+
+	if _, err := d.ListDir(1, "/"); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+
+	stats := d.Stats()
+	if stats == nil {
+		t.Fatal("Stats() returned nil")
+	}
+	br, bw, opsR, opsW := stats.Snapshot()
+	if br == 0 {
+		t.Errorf("BytesRead = 0, want > 0")
+	}
+	if bw == 0 {
+		t.Errorf("BytesWritten = 0, want > 0")
+	}
+	if opsR == 0 {
+		t.Errorf("OpsRead = 0, want > 0")
+	}
+	if opsW == 0 {
+		t.Errorf("OpsWritten = 0, want > 0")
+	}
+}
+
 func TestIntegrationStreamingWrite(t *testing.T) {
 	srv := startSFTPServer(t)
 	d := mount(t, srv)

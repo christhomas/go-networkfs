@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/textproto"
 	"strconv"
 	"strings"
@@ -40,12 +41,22 @@ type FTPDriver struct {
 	rootPath  string
 	ftps      bool
 	client    *ftp.ServerConn
+	// Per-mount transport counters fed by api.CountingConn. The
+	// host-side IOStatsCollector polls a Snapshot() each tick. For
+	// FTPS we count *ciphertext* on the wire (the conn is wrapped
+	// before the TLS layer) — that matches what an external network
+	// monitor would see.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier
 func (d *FTPDriver) Name() string {
 	return "ftp"
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand our
+// transport counters back through the C ABI.
+func (d *FTPDriver) Stats() *api.MountStats { return d.stats }
 
 // Mount establishes FTP connection.
 //
@@ -87,6 +98,7 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 	d.pass = pass
 	d.rootPath = rootPath
 	d.ftps = ftps
+	d.stats = &api.MountStats{}
 
 	if err := d.connect(); err != nil {
 		return classifyFTPConnectError(err, host, port, user)
@@ -174,12 +186,50 @@ func classifyFTPPathError(err error, path string) error {
 func (d *FTPDriver) connect() error {
 	addr := fmt.Sprintf("%s:%d", d.host, d.port)
 
-	opts := []ftp.DialOption{
-		ftp.DialWithTimeout(5 * time.Second),
+	// We always inject our own dial function so the returned net.Conn
+	// is wrapped in api.CountingConn before the FTP library installs
+	// its protocol layer on top. For implicit FTPS, the dial function
+	// also performs the TLS handshake — we wrap *before* TLS so byte
+	// counts reflect ciphertext on the wire (matches what an external
+	// monitor would observe).
+	var tlsCfg *tls.Config
+	if d.ftps {
+		tlsCfg = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	if d.ftps {
-		opts = append(opts, ftp.DialWithTLS(&tls.Config{InsecureSkipVerify: true}))
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	stats := d.stats
+	dialFunc := func(network, address string) (net.Conn, error) {
+		raw, err := dialer.Dial(network, address)
+		if err != nil {
+			return nil, err
+		}
+		counted := api.WrapConn(raw, stats)
+		if tlsCfg == nil {
+			return counted, nil
+		}
+		// Implicit FTPS: complete the handshake against the
+		// counted conn so the FTP library receives a fully
+		// negotiated TLS conn.
+		tlsConn := tls.Client(counted, tlsCfg)
+		if err := tlsConn.Handshake(); err != nil {
+			counted.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	}
+
+	opts := []ftp.DialOption{
+		ftp.DialWithTimeout(5 * time.Second),
+		ftp.DialWithDialFunc(dialFunc),
+	}
+
+	if tlsCfg != nil {
+		// DialWithTLS still needs to be set so the FTP library
+		// negotiates PBSZ/PROT for the data channel after login.
+		// The library skips its own TLS dial when a custom dialFunc
+		// is present, so this is metadata-only.
+		opts = append(opts, ftp.DialWithTLS(tlsCfg))
 	}
 
 	c, err := ftp.Dial(addr, opts...)

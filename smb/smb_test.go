@@ -92,6 +92,21 @@ func TestMountDialFailurePropagates(t *testing.T) {
 	}
 }
 
+// TestImplementsStatsProvider is a compile-time + runtime check that
+// SMBDriver satisfies api.StatsProvider so MountManager's type-assert
+// keeps working. The Snapshot is allowed to be zero before Mount; we
+// just need the interface to be satisfied and Stats() to be callable.
+func TestImplementsStatsProvider(t *testing.T) {
+	var d any = &SMBDriver{}
+	sp, ok := d.(api.StatsProvider)
+	if !ok {
+		t.Fatal("SMBDriver does not implement api.StatsProvider")
+	}
+	if got := sp.Stats(); got != nil {
+		t.Errorf("Stats() before Mount = %v, want nil", got)
+	}
+}
+
 // TestUnmountIsIdempotent verifies Unmount is safe to call multiple
 // times and before/without Mount.
 func TestUnmountIsIdempotent(t *testing.T) {

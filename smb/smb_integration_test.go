@@ -158,6 +158,35 @@ func TestIntegrationMkdirRename(t *testing.T) {
 	}
 }
 
+// TestIntegrationStatsCounted lists the share root and confirms the
+// per-mount byte counters moved in both directions. Exact byte counts
+// depend on the dialect/encryption negotiation so we only assert
+// non-zero.
+func TestIntegrationStatsCounted(t *testing.T) {
+	d := mountIntegration(t)
+	if _, err := d.ListDir(1, "/"); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+
+	stats := d.Stats()
+	if stats == nil {
+		t.Fatal("Stats() returned nil")
+	}
+	br, bw, opsR, opsW := stats.Snapshot()
+	if br == 0 {
+		t.Errorf("BytesRead = 0, want > 0")
+	}
+	if bw == 0 {
+		t.Errorf("BytesWritten = 0, want > 0")
+	}
+	if opsR == 0 {
+		t.Errorf("OpsRead = 0, want > 0")
+	}
+	if opsW == 0 {
+		t.Errorf("OpsWritten = 0, want > 0")
+	}
+}
+
 func TestIntegrationWrongPassword(t *testing.T) {
 	cfg := requireEnv(t)
 	cfg["pass"] = "definitely-not-the-right-password"

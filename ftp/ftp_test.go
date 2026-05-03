@@ -469,6 +469,40 @@ func TestIntegrationMountDefaultRootFillsSlash(t *testing.T) {
 	}
 }
 
+// TestIntegrationStatsCounted runs ListDir + Stat against the embedded
+// FTP server and confirms the per-mount byte counters were incremented
+// in both directions. Exact byte counts are protocol-dependent (FEAT,
+// PWD probes, etc.) so we only assert non-zero.
+func TestIntegrationStatsCounted(t *testing.T) {
+	ft := startFTPServer(t)
+	d := mount(t, ft)
+
+	if _, err := d.ListDir(7, "/"); err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	if _, err := d.Stat(7, "/"); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	stats := d.Stats()
+	if stats == nil {
+		t.Fatal("Stats() returned nil")
+	}
+	br, bw, opsR, opsW := stats.Snapshot()
+	if br == 0 {
+		t.Errorf("BytesRead = 0, want > 0")
+	}
+	if bw == 0 {
+		t.Errorf("BytesWritten = 0, want > 0")
+	}
+	if opsR == 0 {
+		t.Errorf("OpsRead = 0, want > 0")
+	}
+	if opsW == 0 {
+		t.Errorf("OpsWritten = 0, want > 0")
+	}
+}
+
 func TestIntegrationMountWrongPassword(t *testing.T) {
 	ft := startFTPServer(t)
 	host, port, _ := net.SplitHostPort(ft.addr)
