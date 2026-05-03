@@ -600,3 +600,112 @@ func TestMapHTTPErrorNonSentinelIsNotSentinel(t *testing.T) {
 		}
 	}
 }
+
+// --- GetThumbnail helpers ----------------------------------------------
+
+func TestThumbnailBucket(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{0, "small"},
+		{1, "small"},
+		{96, "small"},
+		{97, "medium"},
+		{176, "medium"},
+		{177, "large"},
+		{800, "large"},
+		{4096, "large"},
+	}
+	for _, c := range cases {
+		if got := thumbnailBucket(c.in); got != c.want {
+			t.Errorf("thumbnailBucket(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPickThumbnailURL_DirectMatch(t *testing.T) {
+	set := map[string]thumbnailEntry{
+		"small":  {URL: "https://cdn/small", Width: 96, Height: 96},
+		"medium": {URL: "https://cdn/medium", Width: 176, Height: 176},
+		"large":  {URL: "https://cdn/large", Width: 800, Height: 800},
+	}
+	cases := []struct {
+		bucket string
+		want   string
+	}{
+		{"small", "https://cdn/small"},
+		{"medium", "https://cdn/medium"},
+		{"large", "https://cdn/large"},
+	}
+	for _, c := range cases {
+		got, ok := pickThumbnailURL(set, c.bucket)
+		if !ok || got != c.want {
+			t.Errorf("pickThumbnailURL(%q) = (%q, %v), want (%q, true)",
+				c.bucket, got, ok, c.want)
+		}
+	}
+}
+
+func TestPickThumbnailURL_FallbackWhenBucketMissing(t *testing.T) {
+	// Only `large` present; requesting `small` falls through to large.
+	set := map[string]thumbnailEntry{
+		"large": {URL: "https://cdn/large", Width: 800, Height: 800},
+	}
+	got, ok := pickThumbnailURL(set, "small")
+	if !ok || got != "https://cdn/large" {
+		t.Errorf("fallback small->large: got (%q, %v), want (https://cdn/large, true)", got, ok)
+	}
+}
+
+func TestPickThumbnailURL_FallbackEmptyURLSkipped(t *testing.T) {
+	// Requested bucket exists but has empty URL — must skip and fall back.
+	set := map[string]thumbnailEntry{
+		"small":  {URL: "", Width: 96, Height: 96},
+		"medium": {URL: "https://cdn/medium", Width: 176, Height: 176},
+	}
+	got, ok := pickThumbnailURL(set, "small")
+	if !ok || got != "https://cdn/medium" {
+		t.Errorf("empty URL should be skipped: got (%q, %v), want medium", got, ok)
+	}
+}
+
+func TestPickThumbnailURL_NoBucketsAtAll(t *testing.T) {
+	got, ok := pickThumbnailURL(map[string]thumbnailEntry{}, "small")
+	if ok || got != "" {
+		t.Errorf("empty set: got (%q, %v), want (\"\", false)", got, ok)
+	}
+}
+
+func TestFallbackOrder(t *testing.T) {
+	cases := []struct {
+		bucket string
+		want   []string
+	}{
+		{"small", []string{"medium", "large"}},
+		{"medium", []string{"large", "small"}},
+		{"large", []string{"medium", "small"}},
+		{"unknown", []string{"medium", "small"}}, // default branch
+	}
+	for _, c := range cases {
+		got := fallbackOrder(c.bucket)
+		if len(got) != len(c.want) {
+			t.Errorf("fallbackOrder(%q) length = %d, want %d", c.bucket, len(got), len(c.want))
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("fallbackOrder(%q)[%d] = %q, want %q",
+					c.bucket, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// TestGetThumbnailNotConnected guards the early-return path.
+func TestGetThumbnailNotConnected(t *testing.T) {
+	d := &OneDriveDriver{}
+	if _, err := d.GetThumbnail(1, "/foo", 256); err != api.ErrNotConnected {
+		t.Fatalf("GetThumbnail unconnected: got %v, want ErrNotConnected", err)
+	}
+}

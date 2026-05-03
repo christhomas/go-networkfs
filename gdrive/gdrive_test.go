@@ -449,3 +449,90 @@ func TestFormatAPIError_ExactShape(t *testing.T) {
 		t.Errorf("err = %q, want %q", err.Error(), want)
 	}
 }
+
+// --- GetThumbnail helpers ----------------------------------------------
+
+func TestThumbnailBucket(t *testing.T) {
+	cases := []struct {
+		in, want int
+	}{
+		{0, 32},
+		{1, 32},
+		{32, 32},
+		{33, 64},
+		{64, 64},
+		{65, 128},
+		{128, 128},
+		{200, 256},
+		{256, 256},
+		{300, 512},
+		{512, 512},
+		{800, 1024},
+		{1024, 1024},
+		{1500, 2048},
+		{2048, 2048},
+		{4096, 2048}, // anything beyond largest bucket caps at 2048
+	}
+	for _, c := range cases {
+		if got := thumbnailBucket(c.in); got != c.want {
+			t.Errorf("thumbnailBucket(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRewriteThumbnailSize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		size int
+		want string
+	}{
+		{
+			name: "replace s220 with s512",
+			in:   "https://lh3.googleusercontent.com/abc=s220",
+			size: 512,
+			want: "https://lh3.googleusercontent.com/abc=s512",
+		},
+		{
+			name: "replace s64 with s32",
+			in:   "https://lh3.googleusercontent.com/xyz=s64",
+			size: 32,
+			want: "https://lh3.googleusercontent.com/xyz=s32",
+		},
+		{
+			name: "strips trailing -c crop modifier with size",
+			in:   "https://lh3.googleusercontent.com/abc=s220-c",
+			size: 256,
+			want: "https://lh3.googleusercontent.com/abc=s256",
+		},
+		{
+			name: "no size suffix gets long-form sz appended",
+			in:   "https://lh3.googleusercontent.com/abc",
+			size: 128,
+			want: "https://lh3.googleusercontent.com/abc?sz=s128",
+		},
+		{
+			name: "url with query gets ampersand-prefixed sz",
+			in:   "https://lh3.googleusercontent.com/abc?foo=bar",
+			size: 256,
+			want: "https://lh3.googleusercontent.com/abc?foo=bar&sz=s256",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := rewriteThumbnailSize(c.in, c.size)
+			if got != c.want {
+				t.Errorf("rewriteThumbnailSize(%q, %d) = %q, want %q",
+					c.in, c.size, got, c.want)
+			}
+		})
+	}
+}
+
+// TestGetThumbnailNotConnected guards the early-return path.
+func TestGetThumbnailNotConnected(t *testing.T) {
+	d := &GDriveDriver{}
+	if _, err := d.GetThumbnail(1, "/foo", 256); err != api.ErrNotConnected {
+		t.Fatalf("GetThumbnail unconnected: got %v, want ErrNotConnected", err)
+	}
+}

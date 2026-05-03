@@ -234,6 +234,114 @@ func (d *OneDriveDriver) Rename(mountID int, oldPath, newPath string) error {
 	return nil
 }
 
+// GetThumbnail implements api.Thumbnailer using the Graph
+// /thumbnails endpoint. Two-step flow:
+//
+//  1. GET /me/drive/root:/path:/thumbnails — returns one ThumbnailSet
+//     per item with `small`/`medium`/`large` URL fields. Each URL is a
+//     short-lived signed CDN link.
+//  2. GET the chosen size's URL with no Authorization header.
+//
+// We pick the standard bucket (small ~96, medium ~176, large ~800)
+// closest to but >= sizePx. Returns a clear error when the item has no
+// thumbnails (folder, freshly uploaded, or non-previewable type).
+func (d *OneDriveDriver) GetThumbnail(mountID int, path string, sizePx int) ([]byte, error) {
+	if !d.connected {
+		return nil, api.ErrNotConnected
+	}
+	p := normPath(path)
+	resp, err := d.do(context.Background(), "GET", d.itemURL(p, "/thumbnails"), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var page struct {
+		Value []map[string]thumbnailEntry `json:"value"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&page)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Value) == 0 {
+		return nil, &api.DriverError{Code: 5, Message: "onedrive: no thumbnail available for " + path}
+	}
+	bucket := thumbnailBucket(sizePx)
+	thumbURL, ok := pickThumbnailURL(page.Value[0], bucket)
+	if !ok || thumbURL == "" {
+		return nil, &api.DriverError{Code: 5, Message: "onedrive: no thumbnail bucket available for " + path}
+	}
+
+	// CDN URL is pre-signed; no Authorization header. Use the wrapped
+	// httpClient so bytes count toward per-mount stats.
+	req, err := http.NewRequestWithContext(context.Background(), "GET", thumbURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	tresp, err := d.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer tresp.Body.Close()
+	if tresp.StatusCode >= 400 {
+		b, _ := io.ReadAll(tresp.Body)
+		return nil, fmt.Errorf("onedrive: thumbnail HTTP %d: %s", tresp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return io.ReadAll(tresp.Body)
+}
+
+// thumbnailBucket maps a requested long-edge size to the standard
+// Graph thumbnail bucket name. Graph offers `small` (~96), `medium`
+// (~176), and `large` (~800) by default.
+func thumbnailBucket(sizePx int) string {
+	switch {
+	case sizePx <= 96:
+		return "small"
+	case sizePx <= 176:
+		return "medium"
+	default:
+		return "large"
+	}
+}
+
+// thumbnailEntry is one (size -> {url,width,height}) entry inside a
+// Graph ThumbnailSet. Hoisted to a named type so GetThumbnail and
+// pickThumbnailURL share the same shape without redeclaring it.
+type thumbnailEntry struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// pickThumbnailURL extracts the URL for the requested bucket from a
+// ThumbnailSet. If the requested bucket is missing it falls back to
+// other present buckets per fallbackOrder, mirroring how clients
+// typically handle partial sets.
+func pickThumbnailURL(set map[string]thumbnailEntry, bucket string) (string, bool) {
+	if e, ok := set[bucket]; ok && e.URL != "" {
+		return e.URL, true
+	}
+	for _, name := range fallbackOrder(bucket) {
+		if e, ok := set[name]; ok && e.URL != "" {
+			return e.URL, true
+		}
+	}
+	return "", false
+}
+
+// fallbackOrder returns the bucket-preference list to try when the
+// requested bucket is absent. Prefer larger buckets first (better to
+// downscale than upscale).
+func fallbackOrder(bucket string) []string {
+	switch bucket {
+	case "small":
+		return []string{"medium", "large"}
+	case "medium":
+		return []string{"large", "small"}
+	default: // large
+		return []string{"medium", "small"}
+	}
+}
+
 // --- driveItem ------------------------------------------------------------
 
 type driveItem struct {

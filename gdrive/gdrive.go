@@ -388,6 +388,97 @@ func (d *GDriveDriver) Rename(mountID int, oldPath, newPath string) error {
 	return nil
 }
 
+// GetThumbnail implements api.Thumbnailer using the Drive v3 File
+// resource's `thumbnailLink` field. Drive returns a short-lived signed
+// URL pointing at Google's CDN (lh3.googleusercontent.com), with a
+// trailing `=s<bucket>` size parameter that the CDN rewrites on demand.
+// We rewrite that suffix to the requested size before fetching, so the
+// CDN crops/scales server-side and we never download the full file.
+//
+// Returns a clear error when the file has no thumbnailLink (folders,
+// freshly uploaded files Drive hasn't generated a preview for yet,
+// non-previewable types like raw binaries).
+func (d *GDriveDriver) GetThumbnail(mountID int, path string, sizePx int) ([]byte, error) {
+	if !d.connected {
+		return nil, api.ErrNotConnected
+	}
+
+	driveID, err := d.resolvePath(normPath(path))
+	if err != nil {
+		return nil, err
+	}
+
+	meta, err := d.apiGET(fmt.Sprintf(
+		"https://www.googleapis.com/drive/v3/files/%s?fields=thumbnailLink,mimeType",
+		driveID))
+	if err != nil {
+		return nil, err
+	}
+	link, _ := meta["thumbnailLink"].(string)
+	if link == "" {
+		return nil, &api.DriverError{Code: 5, Message: "gdrive: no thumbnail available for " + path}
+	}
+
+	thumbURL := rewriteThumbnailSize(link, thumbnailBucket(sizePx))
+
+	// CDN URL is pre-signed; no Authorization header. Use the wrapped
+	// httpClient so bytes count toward per-mount stats.
+	req, err := http.NewRequestWithContext(context.Background(), "GET", thumbURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("thumbnail HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// thumbnailBucket rounds sizePx up to the next power-of-two bucket
+// (32, 64, 128, 256, 512, 1024, 2048). Any size works against
+// Google's CDN, but bucketing improves cache locality across requests
+// for slightly different sizes.
+func thumbnailBucket(sizePx int) int {
+	switch {
+	case sizePx <= 32:
+		return 32
+	case sizePx <= 64:
+		return 64
+	case sizePx <= 128:
+		return 128
+	case sizePx <= 256:
+		return 256
+	case sizePx <= 512:
+		return 512
+	case sizePx <= 1024:
+		return 1024
+	default:
+		return 2048
+	}
+}
+
+// rewriteThumbnailSize replaces the trailing `=s<n>` (or `=s<n>-c`,
+// etc.) on a Drive thumbnailLink with `=s<size>`. If the URL has no
+// `=s` suffix, the suffix is appended via the long-form `?sz=s<n>`
+// query parameter (`&sz=s<n>` if a query string is already present).
+// Pure function — trivially testable without a fake HTTP server.
+func rewriteThumbnailSize(link string, size int) string {
+	idx := strings.LastIndex(link, "=s")
+	if idx < 0 {
+		sep := "?"
+		if strings.Contains(link, "?") {
+			sep = "&"
+		}
+		return fmt.Sprintf("%s%ssz=s%d", link, sep, size)
+	}
+	return fmt.Sprintf("%s=s%d", link[:idx], size)
+}
+
 // --- internal helpers ------------------------------------------------------
 
 const folderMime = "application/vnd.google-apps.folder"
