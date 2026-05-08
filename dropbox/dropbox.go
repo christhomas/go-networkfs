@@ -10,8 +10,10 @@ package dropbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
@@ -19,6 +21,13 @@ import (
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
 	"golang.org/x/oauth2"
 )
+
+// invalidGrantField matches the OAuth-structured `error: "invalid_grant"`
+// field, allowing for any whitespace the JSON encoder might produce.
+// Used instead of a raw substring check so an `error_description`
+// that mentions "invalid_grant" doesn't false-positive into the
+// reauth path.
+var invalidGrantField = regexp.MustCompile(`"error"\s*:\s*"invalid_grant"`)
 
 // Driver type ID - must match dispatcher registry
 const DriverTypeID = 4
@@ -140,16 +149,47 @@ func dbxPath(path string) string {
 }
 
 // wrapDbxError adds a helpful hint when the Dropbox API reports a
-// missing_scope error.
+// missing_scope error, and surfaces dead-refresh-token failures with
+// the `oauth_reauth_required:` prefix so the host-side supervisor can
+// auto-trigger an OAuth re-authorise flow without the user touching
+// settings.
+//
+// Dropbox's PKCE refresh flow lives inside golang.org/x/oauth2 — token
+// refreshes happen lazily on the first API call, so an invalid refresh
+// token surfaces as an `oauth2.RetrieveError`-shaped string with body
+// `{"error":"invalid_grant"…}` rather than a Mount-time failure.
+//
+// Reauth detection prefers the typed `*oauth2.RetrieveError` (parsing
+// `Body` for the structured `error` field), and falls back to a
+// regex over the formatted message that matches the same OAuth field
+// shape — never a bare substring, which would false-positive on an
+// `invalid_client` whose `error_description` happens to mention
+// `invalid_grant`.
 func wrapDbxError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if isInvalidGrant(err) {
+		return fmt.Errorf("oauth_reauth_required: %s", err.Error())
 	}
 	msg := err.Error()
 	if strings.Contains(msg, "missing_scope") {
 		return fmt.Errorf("Dropbox API error: missing required permission scope. Please check your app's permissions and access token. (error: %s)", msg)
 	}
 	return err
+}
+
+// isInvalidGrant reports whether err carries an OAuth `invalid_grant`
+// signal in its structured `error` field (not just anywhere in the
+// payload). Tries the typed *oauth2.RetrieveError first; falls back
+// to a regex over the formatted message for SDK-wrapped errors that
+// don't expose the typed value.
+func isInvalidGrant(err error) bool {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && invalidGrantField.Match(re.Body) {
+		return true
+	}
+	return invalidGrantField.MatchString(err.Error())
 }
 
 // nameFromPath extracts the trailing component of a path.

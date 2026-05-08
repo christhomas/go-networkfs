@@ -676,6 +676,25 @@ func (d *OneDriveDriver) refresh(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
+		// `invalid_grant` (HTTP 4xx) means Microsoft has rejected the
+		// refresh token outright (revoked, expired through inactivity,
+		// password changed, conditional-access policy, …). The
+		// host-side supervisor watches for this prefix and kicks off
+		// the OAuth re-authorise flow so the user never has to dig
+		// into mount settings to fix it.
+		//
+		// Inspect the structured `error` field only — a substring
+		// match would false-positive when "invalid_grant" appears
+		// inside `error_description` of, say, an `invalid_client`
+		// response.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			var oerr struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(b, &oerr) == nil && oerr.Error == "invalid_grant" {
+				return fmt.Errorf("oauth_reauth_required: token refresh HTTP %d: %s", resp.StatusCode, string(b))
+			}
+		}
 		return fmt.Errorf("token refresh HTTP %d: %s", resp.StatusCode, string(b))
 	}
 	var result struct {

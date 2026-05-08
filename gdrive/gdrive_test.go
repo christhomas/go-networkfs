@@ -340,6 +340,39 @@ func TestParseTokenResponse_NonSuccessStatusFormatsBodyIntoError(t *testing.T) {
 	if !strings.Contains(msg, "invalid_grant") {
 		t.Errorf("body missing from error: %q", msg)
 	}
+	// invalid_grant must carry the host-side recovery marker so the
+	// supervisor can auto-trigger an OAuth re-authorise flow.
+	if !strings.Contains(msg, "oauth_reauth_required") {
+		t.Errorf("invalid_grant should carry oauth_reauth_required marker: %q", msg)
+	}
+}
+
+// A non-invalid_grant 4xx (e.g. invalid_client) must NOT carry the
+// reauth marker — the supervisor should treat it as a regular error
+// (bad client config, not a dead refresh token).
+func TestParseTokenResponse_NonReauthErrorOmitsMarker(t *testing.T) {
+	_, err := parseTokenResponse(400, []byte(`{"error":"invalid_client"}`))
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if strings.Contains(err.Error(), "oauth_reauth_required") {
+		t.Errorf("non-invalid_grant must not carry reauth marker: %q", err.Error())
+	}
+}
+
+// A response whose top-level `error` is something else but whose
+// `error_description` happens to mention "invalid_grant" must NOT
+// carry the reauth marker. Pinned because the previous substring-
+// based check would false-positive here.
+func TestParseTokenResponse_InvalidGrantInDescriptionOmitsMarker(t *testing.T) {
+	body := []byte(`{"error":"invalid_client","error_description":"docs mention invalid_grant"}`)
+	_, err := parseTokenResponse(400, body)
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if strings.Contains(err.Error(), "oauth_reauth_required") {
+		t.Errorf("marker should require error=invalid_grant only, got: %q", err.Error())
+	}
 }
 
 func TestParseTokenResponse_MalformedJSON(t *testing.T) {
