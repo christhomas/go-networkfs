@@ -360,6 +360,21 @@ func TestParseTokenResponse_NonReauthErrorOmitsMarker(t *testing.T) {
 	}
 }
 
+// A response whose top-level `error` is something else but whose
+// `error_description` happens to mention "invalid_grant" must NOT
+// carry the reauth marker. Pinned because the previous substring-
+// based check would false-positive here.
+func TestParseTokenResponse_InvalidGrantInDescriptionOmitsMarker(t *testing.T) {
+	body := []byte(`{"error":"invalid_client","error_description":"docs mention invalid_grant"}`)
+	_, err := parseTokenResponse(400, body)
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if strings.Contains(err.Error(), "oauth_reauth_required") {
+		t.Errorf("marker should require error=invalid_grant only, got: %q", err.Error())
+	}
+}
+
 func TestParseTokenResponse_MalformedJSON(t *testing.T) {
 	_, err := parseTokenResponse(200, []byte("not json"))
 	if err == nil {

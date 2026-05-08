@@ -569,7 +569,7 @@ func (d *GDriveDriver) doRefresh() error {
 // Wire spec:
 //
 //	200 + body with {"access_token": "..."} → returns the token
-//	non-200 + invalid_grant body              → error prefixed
+//	non-200 + JSON {"error":"invalid_grant"} → error prefixed
 //	                                            "oauth_reauth_required: …" so
 //	                                            the host-side supervisor can
 //	                                            trigger an auto re-auth flow.
@@ -577,9 +577,17 @@ func (d *GDriveDriver) doRefresh() error {
 //	200 + malformed JSON                      → JSON decode error
 //	200 + valid JSON but empty access_token   → returns "" and nil (caller
 //	                                             can choose to reject if it cares)
+//
+// The reauth detection inspects the structured `error` field only; a
+// substring match would false-positive when "invalid_grant" appears
+// inside `error_description` (e.g. an `invalid_client` response whose
+// description happens to mention the token).
 func parseTokenResponse(status int, body []byte) (string, error) {
 	if status != 200 {
-		if bytes.Contains(body, []byte(`"invalid_grant"`)) || bytes.Contains(body, []byte(`invalid_grant`)) {
+		var oerr struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &oerr) == nil && oerr.Error == "invalid_grant" {
 			return "", fmt.Errorf("oauth_reauth_required: refresh HTTP %d: %s", status, string(body))
 		}
 		return "", fmt.Errorf("refresh HTTP %d: %s", status, string(body))
