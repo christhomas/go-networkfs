@@ -569,12 +569,19 @@ func (d *GDriveDriver) doRefresh() error {
 // Wire spec:
 //
 //	200 + body with {"access_token": "..."} → returns the token
-//	non-200                                   → error "refresh HTTP <code>: <body>"
+//	non-200 + invalid_grant body              → error prefixed
+//	                                            "oauth_reauth_required: …" so
+//	                                            the host-side supervisor can
+//	                                            trigger an auto re-auth flow.
+//	non-200 (other)                           → error "refresh HTTP <code>: <body>"
 //	200 + malformed JSON                      → JSON decode error
 //	200 + valid JSON but empty access_token   → returns "" and nil (caller
 //	                                             can choose to reject if it cares)
 func parseTokenResponse(status int, body []byte) (string, error) {
 	if status != 200 {
+		if bytes.Contains(body, []byte(`"invalid_grant"`)) || bytes.Contains(body, []byte(`invalid_grant`)) {
+			return "", fmt.Errorf("oauth_reauth_required: refresh HTTP %d: %s", status, string(body))
+		}
 		return "", fmt.Errorf("refresh HTTP %d: %s", status, string(body))
 	}
 	var result struct {

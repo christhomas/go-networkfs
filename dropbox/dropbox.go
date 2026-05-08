@@ -140,12 +140,23 @@ func dbxPath(path string) string {
 }
 
 // wrapDbxError adds a helpful hint when the Dropbox API reports a
-// missing_scope error.
+// missing_scope error, and surfaces dead-refresh-token failures with
+// the `oauth_reauth_required:` prefix so the host-side supervisor can
+// auto-trigger an OAuth re-authorise flow without the user touching
+// settings.
+//
+// Dropbox's PKCE refresh flow lives inside golang.org/x/oauth2 — token
+// refreshes happen lazily on the first API call, so an invalid refresh
+// token surfaces as an `oauth2.RetrieveError`-shaped string with body
+// `{"error":"invalid_grant"…}` rather than a Mount-time failure.
 func wrapDbxError(err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
+	if strings.Contains(msg, "invalid_grant") {
+		return fmt.Errorf("oauth_reauth_required: %s", msg)
+	}
 	if strings.Contains(msg, "missing_scope") {
 		return fmt.Errorf("Dropbox API error: missing required permission scope. Please check your app's permissions and access token. (error: %s)", msg)
 	}
