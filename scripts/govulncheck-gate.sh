@@ -13,33 +13,18 @@
 # that says why the fix is not simply being applied.
 set -uo pipefail
 
-# ---------------------------------------------------------------------
-# GO-2026-5051 — out-of-bounds read and panic in ReadDir,
-#                github.com/hirochachacha/go-smb2
+# Nothing is accepted.
 #
-# No fix exists. That library was last released in 2021 and the advisory
-# records "Fixed in: N/A".
+# GO-2026-5051 used to be, on the grounds that hirochachacha/go-smb2 had
+# no fix and the maintained fork made things worse: five reachable
+# vulnerabilities instead of one, and MPL-2.0 back in the compiled set
+# via Kerberos. Backporting the fix to a fork of the original got it
+# without either, so the exception is gone rather than merely smaller.
 #
-# The obvious remedy is the maintained fork, github.com/cloudsoda/go-smb2,
-# which does carry the fix and even keeps a conn-based entry point
-# (DialConn) so this project's byte counting survives the move. It was
-# tried, and it is worse on both counts that matter:
-#
-#   - it pulls in gokrb5 for Kerberos, taking the count from 1 reachable
-#     vulnerability to 5;
-#   - gokrb5 depends on hashicorp/go-multierror, which puts MPL-2.0 back
-#     into the compiled set — the only copyleft this project ever had,
-#     removed deliberately.
-#
-# So the migration is real work with a real design question behind it
-# (whether Kerberos support is wanted at all), not a version bump. Until
-# that is answered, the exposure is a malicious *server* being able to
-# panic the driver reading a directory. That is a denial of service
-# against our own process, on a server the user chose to mount.
-# ---------------------------------------------------------------------
-ACCEPTED=(
-    GO-2026-5051
-)
+# An empty list is the point. Every entry here is a vulnerability this
+# project calls and has decided to live with, and the honest number of
+# those is zero.
+ACCEPTED=()
 
 report=$(mktemp)
 trap 'rm -f "$report"' EXIT
