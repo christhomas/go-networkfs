@@ -12,13 +12,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/antimatter-studios/goftp"
 	"github.com/christhomas/go-networkfs/pkg/api"
-	"github.com/jlaffaye/ftp"
 )
 
 // Driver type ID - must match dispatcher registry
@@ -40,7 +41,7 @@ type FTPDriver struct {
 	pass      string
 	rootPath  string
 	ftps      bool
-	client    *ftp.ServerConn
+	client    *goftp.Client
 	// Per-mount transport counters fed by api.CountingConn. The
 	// host-side IOStatsCollector polls a Snapshot() each tick. For
 	// FTPS we count *ciphertext* on the wire (the conn is wrapped
@@ -104,8 +105,8 @@ func (d *FTPDriver) Mount(mountID int, config map[string]string) error {
 		return classifyFTPConnectError(err, host, port, user)
 	}
 
-	if _, err := d.client.List(rootPath); err != nil {
-		_ = d.client.Quit()
+	if _, err := d.client.ReadDir(rootPath); err != nil {
+		_ = d.client.Close()
 		d.client = nil
 		return classifyFTPPathError(err, rootPath)
 	}
@@ -154,11 +155,24 @@ func classifyFTPConnectError(err error, host string, port int, user string) erro
 	}
 }
 
+// ftpStatus reports the FTP reply code an error carries, or 0 when it
+// carries none.
+//
+// The client exposes this through an interface rather than a concrete
+// type, which is what lets the code below ask "what did the server
+// actually say" without knowing how the error was built.
+func ftpStatus(err error) int {
+	if fe, ok := err.(goftp.Error); ok {
+		return fe.Code()
+	}
+	return 0
+}
+
 // isFTPAuthError recognises the FTP auth-failed status codes.
 // 530 = "Not logged in", 532 = "Need account for storing files".
 func isFTPAuthError(err error) bool {
-	if te, ok := err.(*textproto.Error); ok {
-		return te.Code == 530 || te.Code == 532
+	if code := ftpStatus(err); code == 530 || code == 532 {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "530 ") ||
@@ -168,8 +182,8 @@ func isFTPAuthError(err error) bool {
 // classifyFTPPathError maps the error from listing the remote root
 // directory onto "path doesn't exist" / "permission denied" / generic.
 func classifyFTPPathError(err error, path string) error {
-	if te, ok := err.(*textproto.Error); ok {
-		switch te.Code {
+	{
+		switch ftpStatus(err) {
 		case 550:
 			return fmt.Errorf("remote path %q does not exist or is not accessible: %v", path, err)
 		case 530:
@@ -186,12 +200,15 @@ func classifyFTPPathError(err error, path string) error {
 func (d *FTPDriver) connect() error {
 	addr := fmt.Sprintf("%s:%d", d.host, d.port)
 
-	// We always inject our own dial function so the returned net.Conn
-	// is wrapped in api.CountingConn before the FTP library installs
-	// its protocol layer on top. For implicit FTPS, the dial function
-	// also performs the TLS handshake — we wrap *before* TLS so byte
-	// counts reflect ciphertext on the wire (matches what an external
-	// monitor would observe).
+	// We always inject our own dial function so the returned net.Conn is
+	// wrapped in api.CountingConn before the FTP library installs its
+	// protocol layer on top. The library routes *every* connection
+	// through it — control and data alike — so the counters see file
+	// transfers and not merely the command channel.
+	//
+	// For FTPS the wrap happens before TLS, so the counts are of
+	// ciphertext on the wire, which is what an external monitor would
+	// observe.
 	var tlsCfg *tls.Config
 	if d.ftps {
 		tlsCfg = &tls.Config{InsecureSkipVerify: true}
@@ -199,54 +216,42 @@ func (d *FTPDriver) connect() error {
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	stats := d.stats
-	dialFunc := func(network, address string) (net.Conn, error) {
-		raw, err := dialer.Dial(network, address)
-		if err != nil {
-			return nil, err
-		}
-		counted := api.WrapConn(raw, stats)
-		if tlsCfg == nil {
-			return counted, nil
-		}
-		// Implicit FTPS: complete the handshake against the
-		// counted conn so the FTP library receives a fully
-		// negotiated TLS conn.
-		tlsConn := tls.Client(counted, tlsCfg)
-		if err := tlsConn.Handshake(); err != nil {
-			counted.Close()
-			return nil, err
-		}
-		return tlsConn, nil
-	}
 
-	opts := []ftp.DialOption{
-		ftp.DialWithTimeout(5 * time.Second),
-		ftp.DialWithDialFunc(dialFunc),
+	cfg := goftp.Config{
+		User:     d.user,
+		Password: d.pass,
+		// Governs reads and writes, not the dial — our DialFunc owns
+		// that. Generous because it applies to each read of a data
+		// transfer, and a slow link is not a broken one.
+		Timeout: 30 * time.Second,
+		// Connect and log in before DialConfig returns, so a bad host
+		// or a wrong password fails at mount rather than at the first
+		// directory listing. This used to be a Getwd() probe here; the
+		// library does it now, and does it without the extra command.
+		EagerConnect: true,
+		DialFunc: func(network, address string) (net.Conn, error) {
+			raw, err := dialer.Dial(network, address)
+			if err != nil {
+				return nil, err
+			}
+			// Plain, even for FTPS: the library performs the handshake
+			// on top of what we return, which is exactly the wrapping
+			// order that makes the counters read ciphertext.
+			return api.WrapConn(raw, stats), nil
+		},
 	}
-
+	if d.user == "" {
+		cfg.User = "anonymous"
+		cfg.Password = ""
+	}
 	if tlsCfg != nil {
-		// DialWithTLS still needs to be set so the FTP library
-		// negotiates PBSZ/PROT for the data channel after login.
-		// The library skips its own TLS dial when a custom dialFunc
-		// is present, so this is metadata-only.
-		opts = append(opts, ftp.DialWithTLS(tlsCfg))
+		cfg.TLSConfig = tlsCfg
+		cfg.TLSMode = goftp.TLSImplicit
 	}
 
-	c, err := ftp.Dial(addr, opts...)
+	c, err := goftp.DialConfig(cfg, addr)
 	if err != nil {
 		return err
-	}
-
-	if d.user != "" {
-		if err := c.Login(d.user, d.pass); err != nil {
-			c.Quit()
-			return err
-		}
-	} else {
-		if err := c.Login("anonymous", ""); err != nil {
-			c.Quit()
-			return err
-		}
 	}
 
 	d.client = c
@@ -256,7 +261,7 @@ func (d *FTPDriver) connect() error {
 // Unmount closes FTP connection
 func (d *FTPDriver) Unmount(mountID int) error {
 	if d.client != nil {
-		d.client.Quit()
+		d.client.Close()
 		d.client = nil
 	}
 	d.connected = false
@@ -280,7 +285,7 @@ func (d *FTPDriver) isConnError(err error) bool {
 func (d *FTPDriver) withReconnect(op func() error) error {
 	err := op()
 	if d.isConnError(err) && d.client != nil {
-		d.client.Quit()
+		d.client.Close()
 		d.client = nil
 		if retryErr := d.connect(); retryErr != nil {
 			return retryErr
@@ -292,9 +297,10 @@ func (d *FTPDriver) withReconnect(op func() error) error {
 
 // Stat retrieves file/directory info.
 //
-// Primary path is MLST via GetEntry. Servers that don't implement MLST
-// (e.g. vsftpd returns 502 Command not implemented) fall back to listing
-// the parent directory and matching by name.
+// The FTP client handles the MLST/LIST distinction itself — servers that
+// answer 502 to MLST are retried with LIST inside it — so this no longer
+// carries its own fallback. That fallback, and the 502 detection that
+// drove it, were removed rather than left as code nothing reaches.
 func (d *FTPDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	if !d.connected || d.client == nil {
 		return api.FileInfo{}, api.ErrNotConnected
@@ -308,69 +314,28 @@ func (d *FTPDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	absPath := d.rootPath + path
 
 	err := d.withReconnect(func() error {
-		e, err := d.client.GetEntry(absPath)
-		if err == nil {
-			info = entryToFileInfo(e, path)
-			return nil
+		fi, err := d.client.Stat(absPath)
+		if err != nil {
+			return err
 		}
-		if isNotImplemented(err) {
-			return d.statViaParentList(path, &info)
-		}
-		return err
+		info = fileInfoFrom(fi, path)
+		return nil
 	})
 
 	return info, err
 }
 
-// statViaParentList resolves Stat by LIST-ing the parent directory and
-// matching the basename. Used when the server refuses MLST.
-func (d *FTPDriver) statViaParentList(path string, out *api.FileInfo) error {
-	absPath := d.rootPath + path
-	parentAbs, name := splitParentName(absPath)
-	entries, err := d.client.List(parentAbs)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Name == name {
-			*out = entryToFileInfo(e, path)
-			return nil
-		}
-	}
-	return api.ErrNotFound
-}
-
-func entryToFileInfo(e *ftp.Entry, path string) api.FileInfo {
+// fileInfoFrom converts what the FTP client reports into this package's
+// own shape. `path` is the mount-relative path, which the client does
+// not know: it answers about the absolute path it was asked for.
+func fileInfoFrom(fi os.FileInfo, path string) api.FileInfo {
 	return api.FileInfo{
-		Name:    e.Name,
+		Name:    fi.Name(),
 		Path:    path,
-		IsDir:   e.Type == ftp.EntryTypeFolder,
-		Size:    int64(e.Size),
-		ModTime: time.Time(e.Time).Unix(),
+		IsDir:   fi.IsDir(),
+		Size:    fi.Size(),
+		ModTime: fi.ModTime().Unix(),
 	}
-}
-
-func isNotImplemented(err error) bool {
-	if err == nil {
-		return false
-	}
-	if te, ok := err.(*textproto.Error); ok {
-		return te.Code == ftp.StatusNotImplemented ||
-			te.Code == ftp.StatusNotImplementedParameter
-	}
-	return strings.Contains(err.Error(), "502")
-}
-
-func splitParentName(absPath string) (parent, name string) {
-	trimmed := strings.TrimRight(absPath, "/")
-	idx := strings.LastIndex(trimmed, "/")
-	if idx < 0 {
-		return "/", trimmed
-	}
-	if idx == 0 {
-		return "/", trimmed[1:]
-	}
-	return trimmed[:idx], trimmed[idx+1:]
 }
 
 // ListDir returns directory entries
@@ -383,23 +348,19 @@ func (d *FTPDriver) ListDir(mountID int, path string) ([]api.FileInfo, error) {
 	var result []api.FileInfo
 
 	err := d.withReconnect(func() error {
-		entries, err := d.client.List(absPath)
+		entries, err := d.client.ReadDir(absPath)
 		if err != nil {
 			return err
 		}
 
 		var out []api.FileInfo
 		for _, e := range entries {
-			if e.Name == "." || e.Name == ".." {
+			// Kept even though the client filters them: a server that
+			// reports them anyway would otherwise put "." in a listing.
+			if e.Name() == "." || e.Name() == ".." {
 				continue
 			}
-			out = append(out, api.FileInfo{
-				Name:    e.Name,
-				Path:    path + "/" + e.Name,
-				IsDir:   e.Type == ftp.EntryTypeFolder,
-				Size:    int64(e.Size),
-				ModTime: time.Time(e.Time).Unix(),
-			})
+			out = append(out, fileInfoFrom(e, path+"/"+e.Name()))
 		}
 		result = out
 		return nil
@@ -415,47 +376,89 @@ func (d *FTPDriver) OpenFile(mountID int, path string) (io.ReadCloser, error) {
 	}
 
 	absPath := d.rootPath + path
-	var reader io.ReadCloser
 
-	err := d.withReconnect(func() error {
-		r, err := d.client.Retr(absPath)
-		if err != nil {
-			return err
-		}
-		reader = r
-		return nil
-	})
+	// The client writes a file to an io.Writer rather than handing back
+	// a reader, so a pipe turns the push into the pull this interface
+	// promises. The transfer runs in its own goroutine and closes the
+	// pipe with whatever it ended with, so the reader sees a clean EOF
+	// on success and the real error otherwise.
+	//
+	// This deliberately does not go through withReconnect. Retrying is
+	// only safe for an operation that can be repeated from the start,
+	// and by the time a streaming transfer fails the caller may already
+	// have read part of it — a retry would hand them the beginning of
+	// the file twice.
+	pr, pw := io.Pipe()
+	go func() {
+		pw.CloseWithError(d.client.Retrieve(absPath, pw))
+	}()
 
-	return reader, err
+	// Block until the first byte arrives or the transfer fails, so that
+	// opening something unreadable is reported here rather than at the
+	// caller's first Read. Callers rely on that: a missing file has
+	// always been an error from OpenFile.
+	first := make([]byte, 1)
+	n, err := pr.Read(first)
+	if err != nil && err != io.EOF {
+		pr.CloseWithError(err)
+		return nil, err
+	}
+
+	return &primedReader{first: first[:n], rest: pr}, nil
 }
 
-// CreateFile returns a writer for file creation
-// Note: FTP STOR requires the data to be available at call time,
-// so we collect data and store in Close()
+// primedReader replays the byte OpenFile consumed to find out whether
+// the transfer was going to work, then gets out of the way.
+type primedReader struct {
+	first []byte
+	rest  *io.PipeReader
+}
+
+func (r *primedReader) Read(p []byte) (int, error) {
+	if len(r.first) > 0 {
+		n := copy(p, r.first)
+		r.first = r.first[n:]
+		return n, nil
+	}
+	return r.rest.Read(p)
+}
+
+// Close stops the transfer. The goroutine feeding the pipe unblocks on
+// its next write, so abandoning a partly-read file does not leak it.
+func (r *primedReader) Close() error {
+	r.first = nil
+	return r.rest.Close()
+}
+
+// CreateFile returns a writer that streams into an upload.
+//
+// It used to gather the whole file in memory and send it from Close,
+// which made the cost of copying a file its size in RAM. The upload now
+// runs concurrently and the writer feeds it, so a large file costs a
+// pipe buffer.
 type ftpWriter struct {
-	data   []byte
-	driver *FTPDriver
-	path   string
-	closed bool
+	pw   *io.PipeWriter
+	done chan error
+	once sync.Once
+	err  error
 }
 
-func (w *ftpWriter) Write(p []byte) (n int, err error) {
-	if w.closed {
-		return 0, fmt.Errorf("writer closed")
-	}
-	w.data = append(w.data, p...)
-	return len(p), nil
+func (w *ftpWriter) Write(p []byte) (int, error) {
+	return w.pw.Write(p)
 }
 
+// Close ends the upload and waits for it to finish.
+//
+// The wait is the point: a write that the server rejects fails the
+// upload goroutine, not the Write call that fed it, so without waiting
+// here a failed upload would look like a successful one. Close is the
+// last chance to say otherwise.
 func (w *ftpWriter) Close() error {
-	if w.closed {
-		return nil
-	}
-	w.closed = true
-	return w.driver.withReconnect(func() error {
-		absPath := w.driver.rootPath + w.path
-		return w.driver.client.Stor(absPath, strings.NewReader(string(w.data)))
+	w.once.Do(func() {
+		w.pw.Close()
+		w.err = <-w.done
 	})
+	return w.err
 }
 
 func (d *FTPDriver) CreateFile(mountID int, path string) (io.WriteCloser, error) {
@@ -463,11 +466,21 @@ func (d *FTPDriver) CreateFile(mountID int, path string) (io.WriteCloser, error)
 		return nil, api.ErrNotConnected
 	}
 
-	return &ftpWriter{
-		driver: d,
-		path:   path,
-		data:   make([]byte, 0),
-	}, nil
+	absPath := d.rootPath + path
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+
+	// Not through withReconnect, for the same reason as OpenFile: the
+	// pipe can only be read once, so a retry would upload whatever was
+	// left of it rather than the file.
+	go func() {
+		err := d.client.Store(absPath, pr)
+		// Unblock any Write still waiting on a pipe nothing is reading.
+		pr.CloseWithError(err)
+		done <- err
+	}()
+
+	return &ftpWriter{pw: pw, done: done}, nil
 }
 
 // Mkdir creates a directory
@@ -478,7 +491,8 @@ func (d *FTPDriver) Mkdir(mountID int, path string) error {
 
 	absPath := d.rootPath + path
 	return d.withReconnect(func() error {
-		return d.client.MakeDir(absPath)
+		_, err := d.client.Mkdir(absPath)
+		return err
 	})
 }
 
@@ -500,7 +514,7 @@ func (d *FTPDriver) Remove(mountID int, path string) error {
 
 	// If that fails, try to remove as directory
 	return d.withReconnect(func() error {
-		return d.client.RemoveDir(absPath)
+		return d.client.Rmdir(absPath)
 	})
 }
 

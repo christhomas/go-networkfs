@@ -444,7 +444,7 @@ func TestIntegrationReconnectAfterDrop(t *testing.T) {
 	// Simulate a dropped server connection by quitting the underlying
 	// ServerConn. The next op should surface a connection-class error
 	// that withReconnect detects, reconnect the driver, and succeed.
-	if err := d.client.Quit(); err != nil {
+	if err := d.client.Close(); err != nil {
 		t.Fatalf("force quit: %v", err)
 	}
 
