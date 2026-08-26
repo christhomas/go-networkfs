@@ -4,10 +4,10 @@ go 1.25.0
 
 require (
 	github.com/antimatter-studios/go-smb2 v1.2.0
+	github.com/antimatter-studios/goftp v1.4.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5
-	github.com/jlaffaye/ftp v0.2.0
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/pkg/sftp v1.13.10
 	github.com/studio-b12/gowebdav v0.12.0
@@ -31,8 +31,6 @@ require (
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/golang/protobuf v1.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/errwrap v1.0.0 // indirect
-	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
