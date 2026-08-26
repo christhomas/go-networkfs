@@ -7,19 +7,18 @@ on:
 
 jobs:
   test:
-    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        go: ["stable"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
+          go-version-file: go.mod
           cache: true
 
       - name: go mod verify
@@ -48,7 +47,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version-file: go.mod
           cache: true
 
       - name: gofmt
@@ -72,14 +71,19 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version-file: go.mod
           cache: true
 
       - name: install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
+      # Not `govulncheck ./...` directly: the gate fails on anything this
+      # project calls that has not been consciously accepted, and the
+      # accepted list carries the reason each one is there. A check that
+      # is permanently red because of one unfixable finding reports
+      # nothing at all.
       - name: govulncheck
-        run: govulncheck ./...
+        run: ./scripts/govulncheck-gate.sh
 
   build-archives:
     name: c-archive builds (${{ matrix.os }})
@@ -93,7 +97,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version-file: go.mod
           cache: true
 
       - name: build libftp.a
