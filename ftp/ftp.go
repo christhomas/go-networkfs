@@ -224,6 +224,11 @@ func (d *FTPDriver) connect() error {
 		// that. Generous because it applies to each read of a data
 		// transfer, and a slow link is not a broken one.
 		Timeout: 30 * time.Second,
+		// Connect and log in before DialConfig returns, so a bad host
+		// or a wrong password fails at mount rather than at the first
+		// directory listing. This used to be a Getwd() probe here; the
+		// library does it now, and does it without the extra command.
+		EagerConnect: true,
 		DialFunc: func(network, address string) (net.Conn, error) {
 			raw, err := dialer.Dial(network, address)
 			if err != nil {
@@ -246,16 +251,6 @@ func (d *FTPDriver) connect() error {
 
 	c, err := goftp.DialConfig(cfg, addr)
 	if err != nil {
-		return err
-	}
-
-	// DialConfig does not connect — the client opens connections from a
-	// pool on first use. Mounting has to fail here rather than at the
-	// first directory listing, so this forces one connection and one
-	// login now, and a bad host or a wrong password is reported by
-	// Mount as it was before.
-	if _, err := c.Getwd(); err != nil {
-		c.Close()
 		return err
 	}
 
