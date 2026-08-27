@@ -15,3 +15,11 @@ coverage.html
 # reference — it only references the dummy docker creds.
 .env.yaml
 !test-server/.env.yaml
+
+# Build output. `chore archives` writes the c-archives and their generated
+# headers here for a consumer to copy out of (`chore artifact` prints this
+# directory). build/ above is `chore tui`'s.
+/dist/
+
+# chore fingerprint cache (sources:/generates: checksums). Derived data.
+.chore/
