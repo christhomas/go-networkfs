@@ -179,6 +179,18 @@ tasks:
     desc: Skip the integration tests that start embedded servers
     cmds: ['go test -race -short ./...']
 
+  test:smb:
+    desc: SMB driver integration tests against a throwaway Samba container
+    # THE SMB DRIVER CANNOT BE TESTED WITHOUT A SERVER, and unlike ftp there
+    # is no in-process Go SMB server to stand one up with. That is why these
+    # tests sit behind the smb_integration build tag and why `test` does not
+    # run them: without this task they are skipped everywhere, forever, and
+    # the driver's coverage is the unit tests alone.
+    #
+    # The Makefile owns the container lifecycle so both entry points start
+    # the same server rather than two that drift.
+    cmds: ['make test-smb']
+
   vet:
     desc: go vet
     cmds: ['go vet ./...']

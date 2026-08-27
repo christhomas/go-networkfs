@@ -40,6 +40,23 @@ jobs:
           name: coverage
           path: coverage.out
 
+  smb-integration:
+    name: SMB integration (Samba container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      # The SMB driver has no in-process server to test against, so the
+      # integration tests need a real one. Without this job they are behind a
+      # build tag that nothing ever sets.
+      - name: SMB integration tests
+        run: make test-smb
+
   lint:
     name: lint
     runs-on: ubuntu-latest

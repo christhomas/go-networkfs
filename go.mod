@@ -3,10 +3,10 @@ module github.com/christhomas/go-networkfs
 go 1.25.0
 
 require (
+	github.com/antimatter-studios/go-smb2-hirochachacha v1.2.2
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5
-	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/jlaffaye/ftp v0.2.0
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/pkg/sftp v1.13.10
