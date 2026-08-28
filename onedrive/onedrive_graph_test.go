@@ -10,6 +10,7 @@ package onedrive
 // tests can assert on the request rather than only the result.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -384,5 +385,112 @@ func TestStatOnMissingItemErrors(t *testing.T) {
 
 	if _, err := d.Stat(1, "/nope.txt"); err == nil {
 		t.Error("Stat of a missing item succeeded")
+	}
+}
+
+// Anything over uploadMemCap spills to a temp file and goes up through an
+// upload session rather than a single PUT. The chunk goes to the URL the
+// session hands back, which is Azure-backed rather than Graph, and so must
+// carry no Authorization header — sending one there is a documented way to
+// have the upload rejected.
+func TestLargeUploadUsesSessionAndOmitsAuthOnChunks(t *testing.T) {
+	g := newFakeGraph(t)
+
+	var chunkAuth string
+	var chunkRange string
+	var received []byte
+	g.handle("PUT /uploadurl", func(w http.ResponseWriter, r *http.Request) {
+		chunkAuth = r.Header.Get("Authorization")
+		chunkRange = r.Header.Get("Content-Range")
+		b, _ := io.ReadAll(r.Body)
+		received = append(received, b...)
+		w.WriteHeader(http.StatusAccepted)
+	})
+	g.handle("POST /v1.0/me/drive/root:/big.bin:/createUploadSession",
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"uploadUrl":%q}`, g.server.URL+"/uploadurl")
+		})
+	d := mountFake(t, g)
+
+	payload := bytes.Repeat([]byte("x"), uploadMemCap+1024)
+
+	w, err := d.CreateFile(1, "/big.bin")
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if g.find("POST", "/v1.0/me/drive/root:/big.bin:/createUploadSession") == nil {
+		t.Fatal("a large upload did not open an upload session")
+	}
+	if g.find("PUT", "/v1.0/me/drive/root:/big.bin:/content") != nil {
+		t.Error("a large upload also used the small-file PUT")
+	}
+	if chunkAuth != "" {
+		t.Errorf("chunk carried an Authorization header (%q); the upload URL is pre-authorised", chunkAuth)
+	}
+	if want := fmt.Sprintf("bytes 0-%d/%d", len(payload)-1, len(payload)); chunkRange != want {
+		t.Errorf("Content-Range %q, want %q", chunkRange, want)
+	}
+	if len(received) != len(payload) {
+		t.Errorf("server received %d bytes, want %d", len(received), len(payload))
+	}
+}
+
+// A small file goes up in one PUT and never opens a session.
+func TestSmallUploadUsesSinglePut(t *testing.T) {
+	g := newFakeGraph(t)
+	g.json("PUT /v1.0/me/drive/root:/small.txt:/content", http.StatusCreated, `{"name":"small.txt"}`)
+	d := mountFake(t, g)
+
+	w, _ := d.CreateFile(1, "/small.txt")
+	if _, err := w.Write([]byte("tiny")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if g.find("POST", "/v1.0/me/drive/root:/small.txt:/createUploadSession") != nil {
+		t.Error("a small upload opened an upload session")
+	}
+	if g.find("PUT", "/v1.0/me/drive/root:/small.txt:/content") == nil {
+		t.Error("no single-PUT upload recorded")
+	}
+}
+
+// A session that comes back without an uploadUrl is unusable and must be
+// reported rather than followed.
+func TestUploadSessionWithoutURLFails(t *testing.T) {
+	g := newFakeGraph(t)
+	g.json("POST /v1.0/me/drive/root:/big.bin:/createUploadSession", http.StatusOK, `{}`)
+	d := mountFake(t, g)
+
+	w, _ := d.CreateFile(1, "/big.bin")
+	if _, err := w.Write(bytes.Repeat([]byte("y"), uploadMemCap+16)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err == nil {
+		t.Error("close succeeded despite a session with no uploadUrl")
+	}
+}
+
+func TestWriteAfterCloseFails(t *testing.T) {
+	g := newFakeGraph(t)
+	g.json("PUT /v1.0/me/drive/root:/a.txt:/content", http.StatusCreated, `{}`)
+	d := mountFake(t, g)
+
+	w, _ := d.CreateFile(1, "/a.txt")
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := w.Write([]byte("late")); err == nil {
+		t.Error("write on a closed writer succeeded")
 	}
 }

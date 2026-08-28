@@ -436,3 +436,182 @@ func TestNotConnectedBeforeMount(t *testing.T) {
 		t.Error("ListDir succeeded before Mount")
 	}
 }
+
+// A new file is a multipart POST carrying metadata and bytes; an existing one
+// is a PATCH against its id. Both shapes are worth pinning, since the choice
+// between them turns on whether the path resolved.
+func TestCreateFileUploadsNewFile(t *testing.T) {
+	f := newFakeDrive(t)
+	// Nothing resolves, so the file is new and the parent is root.
+	f.json("GET /drive/v3/files", http.StatusOK, `{"files":[]}`)
+	f.json("POST /upload/drive/v3/files", http.StatusOK, `{"id":"new-id"}`)
+	d := mountFake(t, f)
+
+	w, err := d.CreateFile(1, "/fresh.txt")
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	if _, err := w.Write([]byte("payload")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var call *apiCall
+	for i := range f.calls {
+		if f.calls[i].Path == "/upload/drive/v3/files" {
+			call = &f.calls[i]
+		}
+	}
+	if call == nil {
+		t.Fatal("no upload request recorded")
+	}
+	if call.Method != "POST" {
+		t.Errorf("method %s, want POST for a new file", call.Method)
+	}
+	if !strings.Contains(call.Body, `"name":"fresh.txt"`) {
+		t.Errorf("upload body carries no name: %s", call.Body)
+	}
+	if !strings.Contains(call.Body, "payload") {
+		t.Error("upload body does not carry the file bytes")
+	}
+	if !strings.Contains(call.Body, `"parents"`) {
+		t.Error("a new file was uploaded without a parent")
+	}
+	if call.Query.Get("uploadType") != "multipart" {
+		t.Errorf("uploadType %q, want multipart", call.Query.Get("uploadType"))
+	}
+}
+
+func TestCreateFileUpdatesExistingFile(t *testing.T) {
+	f := newFakeDrive(t)
+	f.json("GET /drive/v3/files", http.StatusOK, `{"files":[{"id":"existing-id"}]}`)
+	f.json("PATCH /upload/drive/v3/files/existing-id", http.StatusOK, `{"id":"existing-id"}`)
+	d := mountFake(t, f)
+
+	w, err := d.CreateFile(1, "/there.txt")
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	if _, err := w.Write([]byte("replacement")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	for _, c := range f.calls {
+		if c.Path == "/upload/drive/v3/files/existing-id" {
+			if c.Method != "PATCH" {
+				t.Errorf("method %s, want PATCH for an existing file", c.Method)
+			}
+			if strings.Contains(c.Body, `"parents"`) {
+				t.Error("an update should not re-parent the file")
+			}
+			return
+		}
+	}
+	t.Error("no update request against the existing id")
+}
+
+// A rename inside one folder changes only the name. A move must also hand
+// Drive the parents to add and remove, since a file can have several.
+func TestRenameWithinFolderSendsNameOnly(t *testing.T) {
+	f := newFakeDrive(t)
+	f.json("GET /drive/v3/files", http.StatusOK, `{"files":[{"id":"id-x"}]}`)
+	f.json("PATCH /drive/v3/files/id-x", http.StatusOK, `{"id":"id-x"}`)
+	d := mountFake(t, f)
+
+	if err := d.Rename(1, "/dir/a.txt", "/dir/b.txt"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	for _, c := range f.calls {
+		if c.Method == "PATCH" && c.Path == "/drive/v3/files/id-x" {
+			if c.Query.Get("addParents") != "" || c.Query.Get("removeParents") != "" {
+				t.Error("an in-place rename should not move parents")
+			}
+			if !strings.Contains(c.Body, `"name":"b.txt"`) {
+				t.Errorf("rename body %s does not set the new name", c.Body)
+			}
+			return
+		}
+	}
+	t.Error("no rename request recorded")
+}
+
+func TestRenameAcrossFoldersMovesParents(t *testing.T) {
+	f := newFakeDrive(t)
+	f.handle("GET /drive/v3/files", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(q, "name = 'from'"):
+			_, _ = io.WriteString(w, `{"files":[{"id":"id-from"}]}`)
+		case strings.Contains(q, "name = 'to'"):
+			_, _ = io.WriteString(w, `{"files":[{"id":"id-to"}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"files":[{"id":"id-file"}]}`)
+		}
+	})
+	f.json("PATCH /drive/v3/files/id-file", http.StatusOK, `{"id":"id-file"}`)
+	d := mountFake(t, f)
+
+	if err := d.Rename(1, "/from/a.txt", "/to/a.txt"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	for _, c := range f.calls {
+		if c.Method == "PATCH" && c.Path == "/drive/v3/files/id-file" {
+			if c.Query.Get("addParents") != "id-to" {
+				t.Errorf("addParents %q, want id-to", c.Query.Get("addParents"))
+			}
+			if c.Query.Get("removeParents") != "id-from" {
+				t.Errorf("removeParents %q, want id-from", c.Query.Get("removeParents"))
+			}
+			return
+		}
+	}
+	t.Error("no move request recorded")
+}
+
+// A 401 mid-session means the token lapsed: refresh and retry rather than
+// surfacing it.
+func TestAPIRetriesAfterUnauthorized(t *testing.T) {
+	f := newFakeDrive(t)
+	f.json("GET /drive/v3/files", http.StatusOK, `{"files":[{"id":"id-a"}]}`)
+	calls := 0
+	f.handle("GET /drive/v3/files/id-a", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, `{"error":{"message":"invalid credentials"}}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"a.txt","mimeType":"text/plain","size":"3"}`)
+	})
+	d := mountFake(t, f)
+
+	if _, err := d.Stat(1, "/a.txt"); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("request attempted %d times, expected a retry", calls)
+	}
+	if f.tokens < 2 {
+		t.Errorf("minted %d tokens, expected a refresh after the 401", f.tokens)
+	}
+}
+
+func TestAPIErrorIsReported(t *testing.T) {
+	f := newFakeDrive(t)
+	f.json("GET /drive/v3/files", http.StatusOK, `{"files":[{"id":"id-a"}]}`)
+	f.json("GET /drive/v3/files/id-a", http.StatusInternalServerError,
+		`{"error":{"message":"backend hiccup"}}`)
+	d := mountFake(t, f)
+
+	if _, err := d.Stat(1, "/a.txt"); err == nil {
+		t.Error("a 500 was reported as success")
+	}
+}
