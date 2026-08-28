@@ -66,6 +66,11 @@ SFTP_CONTAINER ?= go-networkfs-sftp
 SFTP_USER      ?= testuser
 SFTP_PASS      ?= testpass
 
+MOCK_ADDR      ?= 127.0.0.1
+MOCK_PORT      ?= 8081
+MOCK_IMAGE     ?= go-networkfs-mockapi:test
+MOCK_CONTAINER ?= go-networkfs-mockapi
+
 DAV_PORT      ?= 8080
 DAV_IMAGE     ?= bytemark/webdav:latest
 DAV_CONTAINER ?= go-networkfs-webdav
@@ -171,16 +176,30 @@ webdav-down:
 
 # Every server at once, and the matching teardown. Nothing here is installed
 # on the machine running the tests.
+# The stand-in for Dropbox, Google Drive and OneDrive. Built from source in
+# this repository rather than pulled, so it cannot drift from the drivers.
+.PHONY: mockapi-up
+mockapi-up:
+	docker build -t $(MOCK_IMAGE) -f .github/docker/mockapi/Dockerfile .
+	@docker rm -f $(MOCK_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --network $(TEST_NETWORK) --network-alias mockapi \
+		--name $(MOCK_CONTAINER) -p $(MOCK_PORT):8081 $(MOCK_IMAGE)
+	$(call wait_for_port,$(MOCK_CONTAINER),$(MOCK_PORT))
+
+.PHONY: mockapi-down
+mockapi-down:
+	@docker rm -f $(MOCK_CONTAINER) >/dev/null 2>&1 || true
+
 .PHONY: network-up
 network-up:
 	@docker network inspect $(TEST_NETWORK) >/dev/null 2>&1 || \
 		docker network create $(TEST_NETWORK) >/dev/null
 
 .PHONY: servers-up
-servers-up: network-up samba-up minio-up ftp-up sftp-up webdav-up
+servers-up: network-up samba-up minio-up ftp-up sftp-up webdav-up mockapi-up
 
 .PHONY: servers-down
-servers-down: samba-down minio-down ftp-down sftp-down webdav-down
+servers-down: samba-down minio-down ftp-down sftp-down webdav-down mockapi-down
 	@docker network rm $(TEST_NETWORK) >/dev/null 2>&1 || true
 
 .PHONY: minio-down
@@ -216,6 +235,7 @@ test-integration: servers-up
 		S3_ENDPOINT=$(S3_ADDR):$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
 		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
 		$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
+			-coverpkg=$$($(GO) list ./... | grep -v '/test/' | paste -sd, -) \
 			-covermode=atomic -coverprofile=$(COVERAGE) ./... ; \
 		status=$$? ; \
 		if [ $$status -ne 0 ]; then $(MAKE) servers-down ; exit $$status; fi
@@ -224,6 +244,7 @@ test-integration: servers-up
 	@$(MAKE) --no-print-directory cabi-cover ; \
 		status=$$? ; $(MAKE) servers-down ; \
 		if [ $$status -ne 0 ]; then exit $$status; fi
+	@$(MAKE) --no-print-directory cover-strip-harness
 	@$(GO) tool cover -func=$(COVERAGE) | tail -1
 
 # Run the C harness against the already-running Samba and fold its profile
@@ -272,6 +293,9 @@ cabi-drivers:
 			ftp) cfg='{"host":"$(FTP_ADDR)","port":"$(FTP_PORT)","user":"$(FTP_USER)","pass":"$(FTP_PASS)"}' ;; \
 			sftp) cfg='{"host":"$(SFTP_ADDR)","port":"$(SFTP_PORT)","user":"$(SFTP_USER)","pass":"$(SFTP_PASS)","root":"/upload"}' ;; \
 			webdav) cfg='{"url":"http://$(DAV_ADDR):$(DAV_PORT)","user":"$(DAV_USER)","pass":"$(DAV_PASS)"}' ;; \
+			dropbox) cfg='{"access_token":"mock","api_base_url":"http://$(MOCK_ADDR):$(MOCK_PORT)/dropbox"}' ;; \
+			gdrive) cfg='{"client_id":"c","client_secret":"s","refresh_token":"r","api_base_url":"http://$(MOCK_ADDR):$(MOCK_PORT)/gdrive"}' ;; \
+			onedrive) cfg='{"client_id":"c","refresh_token":"r","api_base_url":"http://$(MOCK_ADDR):$(MOCK_PORT)/onedrive"}' ;; \
 			*)   cfg='' ;; \
 		esac ; \
 		CABI_CONFIG="$$cfg" GOCOVERDIR=$(CABI_DIR)/drivers/cov-$$d \
@@ -319,12 +343,23 @@ test-docker: servers-up
 # The suite, assuming the servers are already up and reachable at the *_ADDR
 # addresses. This is what runs inside the runner container; it starts nothing
 # and tears nothing down.
+#
+# test/... is excluded from the measurement. The mock API server lives there
+# and is scaffolding, not product: counting it would mean the coverage figure
+# falls every time the test harness grows, which is the wrong incentive.
 .PHONY: ci-tests
 ci-tests:
 	$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
+		-coverpkg=$$($(GO) list ./... | grep -v '/test/' | paste -sd, -) \
 		-covermode=atomic -coverprofile=$(COVERAGE) ./...
 	@$(MAKE) --no-print-directory cabi-cover
+	@$(MAKE) --no-print-directory cover-strip-harness
 	@$(GO) tool cover -func=$(COVERAGE) | tail -1
+
+# Drop the harness's own packages from a profile.
+.PHONY: cover-strip-harness
+cover-strip-harness:
+	@grep -v '/test/' $(COVERAGE) > $(COVERAGE).tmp && mv $(COVERAGE).tmp $(COVERAGE)
 
 .PHONY: bench
 bench:

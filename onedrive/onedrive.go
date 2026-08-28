@@ -69,9 +69,30 @@ type OneDriveDriver struct {
 
 	httpClient *http.Client
 	connected  bool
+
+	// Endpoints, per driver rather than per package, so one mount can be
+	// pointed at a substitute without moving every other mount with it.
+	graphBase string
+	tokenURL  string
 }
 
 func (d *OneDriveDriver) Name() string { return "onedrive" }
+
+// base and tokenEndpoint return the endpoints this driver was mounted with, falling
+// back to the live service so a zero-value driver still builds sane URLs.
+func (d *OneDriveDriver) base() string {
+	if d.graphBase != "" {
+		return d.graphBase
+	}
+	return graphBase
+}
+
+func (d *OneDriveDriver) tokenEndpoint() string {
+	if d.tokenURL != "" {
+		return d.tokenURL
+	}
+	return tokenURL
+}
 
 // Mount validates config and obtains an initial access token.
 //
@@ -89,6 +110,14 @@ func (d *OneDriveDriver) Mount(mountID int, config map[string]string) error {
 	}
 
 	d.httpClient = &http.Client{Timeout: 60 * time.Second}
+
+	// api_base_url points every request at a substitute for the live service,
+	// which is what lets the driver be tested, or run against a mock, without
+	// Microsoft. Left unset, the accessors fall back to the live endpoints.
+	if base := strings.TrimRight(config["api_base_url"], "/"); base != "" {
+		d.graphBase = base + "/v1.0"
+		d.tokenURL = base + "/token"
+	}
 	if err := d.refresh(context.Background()); err != nil {
 		return &api.DriverError{Code: 12, Message: "onedrive: initial token refresh failed: " + err.Error()}
 	}
@@ -554,7 +583,7 @@ func (d *OneDriveDriver) refresh(ctx context.Context) error {
 	if d.clientSecret != "" {
 		form.Set("client_secret", d.clientSecret)
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", d.tokenEndpoint(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -672,12 +701,12 @@ func graphPath(path string) string {
 func (d *OneDriveDriver) itemURL(path, suffix string) string {
 	gp := graphPath(path)
 	if gp == "" {
-		return graphBase + "/me/drive/root" + suffix
+		return d.base() + "/me/drive/root" + suffix
 	}
 	if suffix == "" {
-		return graphBase + "/me/drive/root" + gp
+		return d.base() + "/me/drive/root" + gp
 	}
-	return graphBase + "/me/drive/root" + gp + ":" + suffix
+	return d.base() + "/me/drive/root" + gp + ":" + suffix
 }
 
 func normPath(path string) string {
