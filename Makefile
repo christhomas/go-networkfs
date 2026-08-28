@@ -36,6 +36,29 @@ S3_BUCKET     ?= testbucket
 S3_KEY        ?= minioadmin
 S3_SECRET     ?= minioadmin
 
+# The remaining servers. Each driver that can be given one gets one, so its
+# C harness can mount and reach the success paths rather than only the
+# failure paths.
+FTP_PORT      ?= 2121
+FTP_PASV_LO   ?= 40000
+FTP_PASV_HI   ?= 40009
+FTP_IMAGE     ?= garethflowers/ftp-server:latest
+FTP_CONTAINER ?= go-networkfs-ftp
+FTP_USER      ?= testuser
+FTP_PASS      ?= Ftppasswd12345
+
+SFTP_PORT      ?= 2222
+SFTP_IMAGE     ?= atmoz/sftp:latest
+SFTP_CONTAINER ?= go-networkfs-sftp
+SFTP_USER      ?= testuser
+SFTP_PASS      ?= testpass
+
+DAV_PORT      ?= 8080
+DAV_IMAGE     ?= bytemark/webdav:latest
+DAV_CONTAINER ?= go-networkfs-webdav
+DAV_USER      ?= testuser
+DAV_PASS      ?= testpass
+
 # Tags for every driver whose integration tests need a server.
 INTEGRATION_TAGS ?= smb_integration,s3_integration
 
@@ -95,6 +118,52 @@ minio-up:
 	@# their own bucket through the API; the C harness has no way to.
 	@docker exec $(S3_CONTAINER) mkdir -p /data/$(S3_BUCKET)
 
+.PHONY: ftp-up
+ftp-up:
+	@docker rm -f $(FTP_CONTAINER) >/dev/null 2>&1 || true
+	@# Passive mode hands the client a second port to connect back on, so the
+	@# range has to be published and the server has to advertise an address the
+	@# client can actually reach.
+	docker run -d --name $(FTP_CONTAINER) \
+		-p $(FTP_PORT):21 -p $(FTP_PASV_LO)-$(FTP_PASV_HI):$(FTP_PASV_LO)-$(FTP_PASV_HI) \
+		-e FTP_USER=$(FTP_USER) -e FTP_PASS=$(FTP_PASS) \
+		$(FTP_IMAGE)
+	$(call wait_for_port,$(FTP_CONTAINER),$(FTP_PORT))
+
+.PHONY: ftp-down
+ftp-down:
+	@docker rm -f $(FTP_CONTAINER) >/dev/null 2>&1 || true
+
+.PHONY: sftp-up
+sftp-up:
+	@docker rm -f $(SFTP_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(SFTP_CONTAINER) -p $(SFTP_PORT):22 \
+		$(SFTP_IMAGE) $(SFTP_USER):$(SFTP_PASS):::upload
+	$(call wait_for_port,$(SFTP_CONTAINER),$(SFTP_PORT))
+
+.PHONY: sftp-down
+sftp-down:
+	@docker rm -f $(SFTP_CONTAINER) >/dev/null 2>&1 || true
+
+.PHONY: webdav-up
+webdav-up:
+	@docker rm -f $(DAV_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(DAV_CONTAINER) -p $(DAV_PORT):80 \
+		-e USERNAME=$(DAV_USER) -e PASSWORD=$(DAV_PASS) $(DAV_IMAGE)
+	$(call wait_for_port,$(DAV_CONTAINER),$(DAV_PORT))
+
+.PHONY: webdav-down
+webdav-down:
+	@docker rm -f $(DAV_CONTAINER) >/dev/null 2>&1 || true
+
+# Every server at once, and the matching teardown. Nothing here is installed
+# on the machine running the tests.
+.PHONY: servers-up
+servers-up: samba-up minio-up ftp-up sftp-up webdav-up
+
+.PHONY: servers-down
+servers-down: samba-down minio-down ftp-down sftp-down webdav-down
+
 .PHONY: minio-down
 minio-down:
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
@@ -122,7 +191,7 @@ test-s3: minio-up
 # This is the number that matters: without the tags most of each driver is
 # never executed, and the default `test` target reports it as untested.
 .PHONY: test-integration
-test-integration: samba-up minio-up
+test-integration: servers-up
 	@SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
 		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
 		S3_ENDPOINT=127.0.0.1:$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
@@ -130,11 +199,11 @@ test-integration: samba-up minio-up
 		$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
 			-covermode=atomic -coverprofile=$(COVERAGE) ./... ; \
 		status=$$? ; \
-		if [ $$status -ne 0 ]; then $(MAKE) samba-down minio-down ; exit $$status; fi
+		if [ $$status -ne 0 ]; then $(MAKE) servers-down ; exit $$status; fi
 	@# The C harnesses need both servers still up: the SMB and S3 archives
 	@# mount against them, which is the only way to reach the success paths.
 	@$(MAKE) --no-print-directory cabi-cover ; \
-		status=$$? ; $(MAKE) samba-down minio-down ; \
+		status=$$? ; $(MAKE) servers-down ; \
 		if [ $$status -ne 0 ]; then exit $$status; fi
 	@$(GO) tool cover -func=$(COVERAGE) | tail -1
 
@@ -158,10 +227,10 @@ cabi-cover: cabi-drivers cabi-unified
 # export, so they are built and run without coverage: what they prove is that
 # the archive links and the ABI behaves, which does not depend on measuring it.
 .PHONY: test-cabi
-test-cabi: samba-up minio-up
+test-cabi: servers-up
 	@$(MAKE) --no-print-directory cabi-drivers
 	@$(MAKE) --no-print-directory cabi-unified ; \
-		status=$$? ; $(MAKE) samba-down minio-down ; exit $$status
+		status=$$? ; $(MAKE) servers-down ; exit $$status
 
 # The eight per-driver archives, unmounted. These reach openfile, writefile and
 # setOutBytes, which no Go test can call.
@@ -181,6 +250,9 @@ cabi-drivers:
 		case $$d in \
 			smb) cfg='{"host":"127.0.0.1","port":"$(SMB_PORT)","share":"tmp","user":"smbuser","pass":"Smbpasswd12345"}' ;; \
 			s3)  cfg='{"endpoint":"127.0.0.1:$(S3_PORT)","bucket":"$(S3_BUCKET)","access_key_id":"$(S3_KEY)","secret_access_key":"$(S3_SECRET)","secure":"false","use_path_style":"true"}' ;; \
+			ftp) cfg='{"host":"127.0.0.1","port":"$(FTP_PORT)","user":"$(FTP_USER)","pass":"$(FTP_PASS)"}' ;; \
+			sftp) cfg='{"host":"127.0.0.1","port":"$(SFTP_PORT)","user":"$(SFTP_USER)","pass":"$(SFTP_PASS)","root":"/upload"}' ;; \
+			webdav) cfg='{"url":"http://127.0.0.1:$(DAV_PORT)","user":"$(DAV_USER)","pass":"$(DAV_PASS)"}' ;; \
 			*)   cfg='' ;; \
 		esac ; \
 		CABI_CONFIG="$$cfg" GOCOVERDIR=$(CABI_DIR)/drivers/cov-$$d \
