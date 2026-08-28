@@ -40,8 +40,18 @@ func (d *DropboxDriver) Name() string {
 	return "dropbox"
 }
 
-// Mount sets up the Dropbox API client
-// Config expects: access_token
+// Mount sets up the Dropbox API client.
+//
+// Config keys:
+//
+//	access_token - Dropbox API token (required)
+//	api_base_url - optional. Sends every request to this base instead of the
+//	               live API, which is what lets the driver be pointed at a
+//	               mock. The SDK builds its URLs as https://<host>.dropbox.com,
+//	               with the host varying by route, so the substitute has to
+//	               replace the whole generator rather than just a domain: the
+//	               host type is carried in the path so a mock can still tell
+//	               an API call from a content transfer.
 func (d *DropboxDriver) Mount(mountID int, config map[string]string) error {
 	token, ok := config["access_token"]
 	if !ok || token == "" {
@@ -53,6 +63,11 @@ func (d *DropboxDriver) Mount(mountID int, config map[string]string) error {
 	cfg := dbx.Config{
 		Token:    token,
 		LogLevel: dbx.LogInfo,
+	}
+	if base := strings.TrimRight(config["api_base_url"], "/"); base != "" {
+		cfg.URLGenerator = func(hostType, namespace, route string) string {
+			return fmt.Sprintf("%s/%s/2/%s/%s", base, hostType, namespace, route)
+		}
 	}
 	d.client = files.New(cfg)
 	d.connected = true
