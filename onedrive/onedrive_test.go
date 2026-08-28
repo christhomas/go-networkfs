@@ -173,43 +173,36 @@ func TestShouldRetry(t *testing.T) {
 // Expected schedule (attempt: sleep): 0:500ms, 1:1s, 2:2s, 3:4s, 4+:5s (cap).
 //
 // Checking attempts 5 and 6 would take 10+ seconds total; we limit to 0..4.
-func TestBackoffMonotonicAndCapped(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping timing-sensitive backoff test in short mode")
+// The retry schedule is a pure calculation, so it is checked as one. The
+// previous form called backoff() and timed it, which cost 17.5 seconds of
+// real sleeping to assert on arithmetic.
+func TestBackoffDuration(t *testing.T) {
+	want := []time.Duration{
+		500 * time.Millisecond,
+		1 * time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		5 * time.Second, // 8 s, capped
+		5 * time.Second, // 16 s, capped
 	}
-	var prev time.Duration
-	for attempt := 0; attempt <= 4; attempt++ {
-		start := time.Now()
-		backoff(attempt)
-		elapsed := time.Since(start)
-
-		// Must never exceed cap + tolerance.
-		if elapsed > 6*time.Second {
-			t.Errorf("attempt %d: elapsed %v exceeds cap", attempt, elapsed)
+	for attempt, expected := range want {
+		if got := backoffDuration(attempt); got != expected {
+			t.Errorf("backoffDuration(%d) = %v, want %v", attempt, got, expected)
 		}
-		// Monotonic non-decreasing (allow small scheduler jitter).
-		if attempt > 0 && elapsed+100*time.Millisecond < prev {
-			t.Errorf("attempt %d: elapsed %v decreased from prev %v",
-				attempt, elapsed, prev)
-		}
-		prev = elapsed
 	}
 }
 
-// Verify cap is actually 5s for attempts that would otherwise exceed it.
-// attempt=4 → 500*(1<<4) = 8000ms, must cap to 5s.
-func TestBackoffCapAtFive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping timing-sensitive backoff test in short mode")
-	}
-	start := time.Now()
-	backoff(4)
-	elapsed := time.Since(start)
-	if elapsed > 6*time.Second {
-		t.Errorf("backoff(4) slept %v, expected ~5s cap", elapsed)
-	}
-	if elapsed < 4500*time.Millisecond {
-		t.Errorf("backoff(4) slept %v, expected ~5s cap (lower bound)", elapsed)
+func TestBackoffDurationIsMonotonicAndCapped(t *testing.T) {
+	var prev time.Duration
+	for attempt := 0; attempt <= 10; attempt++ {
+		d := backoffDuration(attempt)
+		if d > 5*time.Second {
+			t.Errorf("backoffDuration(%d) = %v, above the 5s cap", attempt, d)
+		}
+		if d < prev {
+			t.Errorf("backoffDuration(%d) = %v, below the previous %v", attempt, d, prev)
+		}
+		prev = d
 	}
 }
 

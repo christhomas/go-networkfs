@@ -4,6 +4,8 @@
 #   test              go test -race with coverage
 #   test-short        skip integration tests that start embedded servers
 #   test-smb          SMB driver integration tests against a Samba container
+#   test-s3           S3 driver integration tests against a MinIO container
+#   test-integration  every driver's integration tests, with coverage
 #   bench             run benchmarks against the FTP driver
 #   coverage-html     open an HTML coverage report in the browser
 #   archives          build all driver c-archives (lib<name>.a) plus the
@@ -24,6 +26,18 @@ SMB_PORT      ?= 4445
 SMB_IMAGE     ?= go-networkfs-samba:test
 SMB_CONTAINER ?= go-networkfs-samba
 
+# MinIO speaks the S3 protocol, so the S3 driver can be tested against the
+# real thing rather than a hand-written stub of it.
+S3_PORT       ?= 9000
+S3_IMAGE      ?= minio/minio:latest
+S3_CONTAINER  ?= go-networkfs-minio
+S3_BUCKET     ?= testbucket
+S3_KEY        ?= minioadmin
+S3_SECRET     ?= minioadmin
+
+# Tags for every driver whose integration tests need a server.
+INTEGRATION_TAGS ?= smb_integration,s3_integration
+
 .PHONY: all
 all: test archives tui
 
@@ -39,21 +53,67 @@ test-short:
 # Start a throwaway Samba server, run the SMB integration tests against it,
 # and take it down however the tests turn out.
 .PHONY: test-smb
-test-smb:
-	docker build -t $(SMB_IMAGE) .github/docker/samba
-	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(SMB_CONTAINER) -p $(SMB_PORT):445 $(SMB_IMAGE)
-	@printf 'waiting for samba on port $(SMB_PORT)'
-	@for i in $$(seq 1 30); do \
-		if nc -z 127.0.0.1 $(SMB_PORT) 2>/dev/null; then echo " ready"; break; fi; \
-		printf '.'; sleep 1; \
-	done
+test-smb: samba-up
 	@SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
 		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
 		$(GO) test -race -count=1 -tags=smb_integration -run Integration ./smb/... ; \
-		status=$$? ; \
-		docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true ; \
-		exit $$status
+		status=$$? ; $(MAKE) samba-down ; exit $$status
+
+# Wait for a container port, or dump the container's logs and fail.
+define wait_for_port
+	@printf 'waiting for $(1) on port $(2)'
+	@for i in $$(seq 1 40); do \
+		if nc -z 127.0.0.1 $(2) 2>/dev/null; then echo " ready"; exit 0; fi; \
+		printf '.'; sleep 1; \
+	done; \
+	echo " timed out"; docker logs $(1); exit 1
+endef
+
+.PHONY: minio-up
+minio-up:
+	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(S3_CONTAINER) -p $(S3_PORT):9000 \
+		-e MINIO_ROOT_USER=$(S3_KEY) -e MINIO_ROOT_PASSWORD=$(S3_SECRET) \
+		$(S3_IMAGE) server /data
+	$(call wait_for_port,$(S3_CONTAINER),$(S3_PORT))
+
+.PHONY: minio-down
+minio-down:
+	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
+
+.PHONY: samba-up
+samba-up:
+	docker build -t $(SMB_IMAGE) .github/docker/samba
+	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(SMB_CONTAINER) -p $(SMB_PORT):445 $(SMB_IMAGE)
+	$(call wait_for_port,$(SMB_CONTAINER),$(SMB_PORT))
+
+.PHONY: samba-down
+samba-down:
+	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
+
+# S3 driver against a throwaway MinIO.
+.PHONY: test-s3
+test-s3: minio-up
+	@S3_ENDPOINT=127.0.0.1:$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
+		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
+		$(GO) test -race -count=1 -tags=s3_integration -run Integration ./s3/... ; \
+		status=$$? ; $(MAKE) minio-down ; exit $$status
+
+# Every driver that needs a server, with one coverage profile over the lot.
+# This is the number that matters: without the tags most of each driver is
+# never executed, and the default `test` target reports it as untested.
+.PHONY: test-integration
+test-integration: samba-up minio-up
+	@SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
+		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
+		S3_ENDPOINT=127.0.0.1:$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
+		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
+		$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
+			-covermode=atomic -coverprofile=$(COVERAGE) ./... ; \
+		status=$$? ; $(MAKE) samba-down minio-down ; \
+		if [ $$status -ne 0 ]; then exit $$status; fi
+	@$(GO) tool cover -func=$(COVERAGE) | tail -1
 
 .PHONY: bench
 bench:

@@ -44,11 +44,18 @@ func init() {
 }
 
 const (
-	graphBase    = "https://graph.microsoft.com/v1.0"
-	tokenURL     = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 	uploadMemCap = 4 * 1024 * 1024  // fits Graph's "small upload" ceiling
 	chunkSize    = 10 * 1024 * 1024 // multiple of 320 KiB, well under 60 MiB cap
 	maxRetries   = 3
+)
+
+// Service endpoints. Variables rather than constants so tests can point the
+// driver at a local server: every request this driver makes is built from
+// these two, and there is otherwise no way to exercise the request and
+// response handling without talking to Microsoft.
+var (
+	graphBase = "https://graph.microsoft.com/v1.0"
+	tokenURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 )
 
 type OneDriveDriver struct {
@@ -603,13 +610,19 @@ func waitForRetry(resp *http.Response, attempt int) {
 	backoff(attempt)
 }
 
-func backoff(attempt int) {
-	// 0.5 s, 1 s, 2 s, 4 s.
+// backoffDuration is how long the attempt-th retry waits: 0.5 s, 1 s, 2 s,
+// 4 s, then capped at 5 s. Separate from backoff so it can be asserted on
+// without spending the time.
+func backoffDuration(attempt int) time.Duration {
 	d := time.Duration(500*(1<<attempt)) * time.Millisecond
 	if d > 5*time.Second {
 		d = 5 * time.Second
 	}
-	time.Sleep(d)
+	return d
+}
+
+func backoff(attempt int) {
+	time.Sleep(backoffDuration(attempt))
 }
 
 func newHTTPError(resp *http.Response) error {
