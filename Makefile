@@ -23,6 +23,19 @@ ARCHIVES   := ftp sftp smb dropbox webdav gdrive s3 onedrive
 
 # The SMB driver needs a real server. There is no in-process Go SMB server to
 # stand in for one, so the integration tests run against a container.
+# Where the servers are reachable. On the host they are published on
+# localhost; inside the containerised runner they are reached by container name
+# on a shared network, so every target takes these from variables.
+SMB_ADDR      ?= 127.0.0.1
+S3_ADDR       ?= 127.0.0.1
+FTP_ADDR      ?= 127.0.0.1
+SFTP_ADDR     ?= 127.0.0.1
+DAV_ADDR      ?= 127.0.0.1
+
+# Servers join this network so the runner container can reach them by name.
+TEST_NETWORK  ?= go-networkfs-test
+RUNNER_IMAGE  ?= go-networkfs-test:latest
+
 SMB_PORT      ?= 4445
 SMB_IMAGE     ?= go-networkfs-samba:test
 SMB_CONTAINER ?= go-networkfs-samba
@@ -91,7 +104,7 @@ test-short:
 # and take it down however the tests turn out.
 .PHONY: test-smb
 test-smb: samba-up
-	@SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
+	@SMB_HOST=$(SMB_ADDR) SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
 		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
 		$(GO) test -race -count=1 -tags=smb_integration -run Integration ./smb/... ; \
 		status=$$? ; $(MAKE) samba-down ; exit $$status
@@ -109,7 +122,7 @@ endef
 .PHONY: minio-up
 minio-up:
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(S3_CONTAINER) -p $(S3_PORT):9000 \
+	docker run -d --network $(TEST_NETWORK) --network-alias minio --name $(S3_CONTAINER) -p $(S3_PORT):9000 \
 		-e MINIO_ROOT_USER=$(S3_KEY) -e MINIO_ROOT_PASSWORD=$(S3_SECRET) \
 		$(S3_IMAGE) server /data
 	$(call wait_for_port,$(S3_CONTAINER),$(S3_PORT))
@@ -124,7 +137,7 @@ ftp-up:
 	@# Passive mode hands the client a second port to connect back on, so the
 	@# range has to be published and the server has to advertise an address the
 	@# client can actually reach.
-	docker run -d --name $(FTP_CONTAINER) \
+	docker run -d --network $(TEST_NETWORK) --network-alias ftp --name $(FTP_CONTAINER) \
 		-p $(FTP_PORT):21 -p $(FTP_PASV_LO)-$(FTP_PASV_HI):$(FTP_PASV_LO)-$(FTP_PASV_HI) \
 		-e FTP_USER=$(FTP_USER) -e FTP_PASS=$(FTP_PASS) \
 		$(FTP_IMAGE)
@@ -137,7 +150,7 @@ ftp-down:
 .PHONY: sftp-up
 sftp-up:
 	@docker rm -f $(SFTP_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(SFTP_CONTAINER) -p $(SFTP_PORT):22 \
+	docker run -d --network $(TEST_NETWORK) --network-alias sftp --name $(SFTP_CONTAINER) -p $(SFTP_PORT):22 \
 		$(SFTP_IMAGE) $(SFTP_USER):$(SFTP_PASS):::upload
 	$(call wait_for_port,$(SFTP_CONTAINER),$(SFTP_PORT))
 
@@ -148,7 +161,7 @@ sftp-down:
 .PHONY: webdav-up
 webdav-up:
 	@docker rm -f $(DAV_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(DAV_CONTAINER) -p $(DAV_PORT):80 \
+	docker run -d --network $(TEST_NETWORK) --network-alias webdav --name $(DAV_CONTAINER) -p $(DAV_PORT):80 \
 		-e USERNAME=$(DAV_USER) -e PASSWORD=$(DAV_PASS) $(DAV_IMAGE)
 	$(call wait_for_port,$(DAV_CONTAINER),$(DAV_PORT))
 
@@ -158,11 +171,17 @@ webdav-down:
 
 # Every server at once, and the matching teardown. Nothing here is installed
 # on the machine running the tests.
+.PHONY: network-up
+network-up:
+	@docker network inspect $(TEST_NETWORK) >/dev/null 2>&1 || \
+		docker network create $(TEST_NETWORK) >/dev/null
+
 .PHONY: servers-up
-servers-up: samba-up minio-up ftp-up sftp-up webdav-up
+servers-up: network-up samba-up minio-up ftp-up sftp-up webdav-up
 
 .PHONY: servers-down
 servers-down: samba-down minio-down ftp-down sftp-down webdav-down
+	@docker network rm $(TEST_NETWORK) >/dev/null 2>&1 || true
 
 .PHONY: minio-down
 minio-down:
@@ -172,7 +191,7 @@ minio-down:
 samba-up:
 	docker build -t $(SMB_IMAGE) .github/docker/samba
 	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --name $(SMB_CONTAINER) -p $(SMB_PORT):445 $(SMB_IMAGE)
+	docker run -d --network $(TEST_NETWORK) --network-alias samba --name $(SMB_CONTAINER) -p $(SMB_PORT):445 $(SMB_IMAGE)
 	$(call wait_for_port,$(SMB_CONTAINER),$(SMB_PORT))
 
 .PHONY: samba-down
@@ -182,7 +201,7 @@ samba-down:
 # S3 driver against a throwaway MinIO.
 .PHONY: test-s3
 test-s3: minio-up
-	@S3_ENDPOINT=127.0.0.1:$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
+	@S3_ENDPOINT=$(S3_ADDR):$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
 		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
 		$(GO) test -race -count=1 -tags=s3_integration -run Integration ./s3/... ; \
 		status=$$? ; $(MAKE) minio-down ; exit $$status
@@ -192,9 +211,9 @@ test-s3: minio-up
 # never executed, and the default `test` target reports it as untested.
 .PHONY: test-integration
 test-integration: servers-up
-	@SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
+	@SMB_HOST=$(SMB_ADDR) SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
 		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
-		S3_ENDPOINT=127.0.0.1:$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
+		S3_ENDPOINT=$(S3_ADDR):$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
 		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
 		$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
 			-covermode=atomic -coverprofile=$(COVERAGE) ./... ; \
@@ -248,11 +267,11 @@ cabi-drivers:
 		$(CC) -DNETWORKFS_COVERAGE -o $(CABI_DIR)/drivers/test_$$d test/cabi/test_$$d.c \
 			-I$(CABI_DIR)/drivers $(CABI_DIR)/drivers/lib$$d.a $(CABI_LDLIBS) || exit 1 ; \
 		case $$d in \
-			smb) cfg='{"host":"127.0.0.1","port":"$(SMB_PORT)","share":"tmp","user":"smbuser","pass":"Smbpasswd12345"}' ;; \
-			s3)  cfg='{"endpoint":"127.0.0.1:$(S3_PORT)","bucket":"$(S3_BUCKET)","access_key_id":"$(S3_KEY)","secret_access_key":"$(S3_SECRET)","secure":"false","use_path_style":"true"}' ;; \
-			ftp) cfg='{"host":"127.0.0.1","port":"$(FTP_PORT)","user":"$(FTP_USER)","pass":"$(FTP_PASS)"}' ;; \
-			sftp) cfg='{"host":"127.0.0.1","port":"$(SFTP_PORT)","user":"$(SFTP_USER)","pass":"$(SFTP_PASS)","root":"/upload"}' ;; \
-			webdav) cfg='{"url":"http://127.0.0.1:$(DAV_PORT)","user":"$(DAV_USER)","pass":"$(DAV_PASS)"}' ;; \
+			smb) cfg='{"host":"$(SMB_ADDR)","port":"$(SMB_PORT)","share":"tmp","user":"smbuser","pass":"Smbpasswd12345"}' ;; \
+			s3)  cfg='{"endpoint":"$(S3_ADDR):$(S3_PORT)","bucket":"$(S3_BUCKET)","access_key_id":"$(S3_KEY)","secret_access_key":"$(S3_SECRET)","secure":"false","use_path_style":"true"}' ;; \
+			ftp) cfg='{"host":"$(FTP_ADDR)","port":"$(FTP_PORT)","user":"$(FTP_USER)","pass":"$(FTP_PASS)"}' ;; \
+			sftp) cfg='{"host":"$(SFTP_ADDR)","port":"$(SFTP_PORT)","user":"$(SFTP_USER)","pass":"$(SFTP_PASS)","root":"/upload"}' ;; \
+			webdav) cfg='{"url":"http://$(DAV_ADDR):$(DAV_PORT)","user":"$(DAV_USER)","pass":"$(DAV_PASS)"}' ;; \
 			*)   cfg='' ;; \
 		esac ; \
 		CABI_CONFIG="$$cfg" GOCOVERDIR=$(CABI_DIR)/drivers/cov-$$d \
@@ -273,9 +292,39 @@ cabi-unified:
 		test/cabi/test_networkfs.c -I$(CABI_DIR)/unified \
 		$(CABI_DIR)/unified/libnetworkfs.a $(CABI_LDLIBS)
 	@GOCOVERDIR=$(CABI_COVER) \
-		SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
+		SMB_HOST=$(SMB_ADDR) SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
 		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
 		$(CABI_DIR)/unified/test_networkfs
+
+# Run the whole suite inside a container, so the only thing needed on the
+# machine is Docker: no Go toolchain, no C compiler, no make.
+#
+# The servers are started on the host and joined to a shared network; the
+# runner joins the same network and reaches them by name on their internal
+# ports rather than through published ones. That is also what makes the
+# pipeline reproducible, since CI runs this same image.
+.PHONY: test-docker
+test-docker: servers-up
+	docker build -t $(RUNNER_IMAGE) .github/docker/testrunner
+	@docker run --rm --network $(TEST_NETWORK) \
+		-v "$(CURDIR)":/src -v go-networkfs-gomod:/go/pkg/mod \
+		-e SMB_ADDR=samba  -e SMB_PORT=445 \
+		-e S3_ADDR=minio   -e S3_PORT=9000 \
+		-e FTP_ADDR=ftp    -e FTP_PORT=21 \
+		-e SFTP_ADDR=sftp  -e SFTP_PORT=22 \
+		-e DAV_ADDR=webdav -e DAV_PORT=80 \
+		$(RUNNER_IMAGE) make ci-tests ; \
+		status=$$? ; $(MAKE) servers-down ; exit $$status
+
+# The suite, assuming the servers are already up and reachable at the *_ADDR
+# addresses. This is what runs inside the runner container; it starts nothing
+# and tears nothing down.
+.PHONY: ci-tests
+ci-tests:
+	$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
+		-covermode=atomic -coverprofile=$(COVERAGE) ./...
+	@$(MAKE) --no-print-directory cabi-cover
+	@$(GO) tool cover -func=$(COVERAGE) | tail -1
 
 .PHONY: bench
 bench:

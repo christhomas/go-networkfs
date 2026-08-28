@@ -40,40 +40,24 @@ jobs:
           name: coverage
           path: coverage.out
 
-  smb-integration:
-    name: SMB integration (Samba container)
+  integration:
+    name: integration (containerised)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      # Everything runs inside containers: five servers for the drivers that
+      # need one, and a runner carrying the Go toolchain and a C compiler. No
+      # toolchain is installed on the runner image, so what CI executes is what
+      # a contributor executes with `make test-docker`.
+      - name: Full suite against containerised servers
+        run: make test-docker
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          go-version: "stable"
-          cache: true
-
-      # The SMB driver has no in-process server to test against, so the
-      # integration tests need a real one. Without this job they are behind a
-      # build tag that nothing ever sets.
-      - name: SMB integration tests
-        run: make test-smb
-
-  c-abi:
-    name: C ABI harness
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "stable"
-          cache: true
-
-      # The archives are what ship, and until now nothing exercised them as a
-      # consumer does. This links each one from C and calls its exported
-      # functions, which is also the only way to reach the entry points taking
-      # a ByteSlice or a size_t: a Go test file may not import "C".
-      - name: C ABI tests
-        run: make test-cabi
+          name: integration-coverage
+          path: coverage.out
 
   lint:
     name: lint
