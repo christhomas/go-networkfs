@@ -34,6 +34,17 @@ func init() {
 	})
 }
 
+// Service endpoints. Variables rather than constants so tests can point the
+// driver at a local server: every request it makes is built from these four,
+// and there is otherwise no way to exercise the request building, the token
+// refresh, the pagination or the upload paths without talking to Google.
+var (
+	driveBase    = "https://www.googleapis.com/drive/v3"
+	uploadBase   = "https://www.googleapis.com/upload/drive/v3"
+	tokenInfoURL = "https://www.googleapis.com/oauth2/v1/tokeninfo"
+	tokenURL     = "https://oauth2.googleapis.com/token"
+)
+
 // GDriveDriver implements the Driver interface for Google Drive.
 type GDriveDriver struct {
 	connected bool
@@ -121,7 +132,7 @@ func (d *GDriveDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	}
 
 	meta, err := d.apiGET(fmt.Sprintf(
-		"https://www.googleapis.com/drive/v3/files/%s?fields=name,mimeType,size,modifiedTime",
+		driveBase+"/files/%s?fields=name,mimeType,size,modifiedTime",
 		driveID))
 	if err != nil {
 		return api.FileInfo{}, err
@@ -165,7 +176,7 @@ func (d *GDriveDriver) ListDir(mountID int, path string) ([]api.FileInfo, error)
 	var out []api.FileInfo
 	for {
 		urlStr := fmt.Sprintf(
-			"https://www.googleapis.com/drive/v3/files?q=%s&fields=%s&pageSize=1000",
+			driveBase+"/files?q=%s&fields=%s&pageSize=1000",
 			url.QueryEscape(query), url.QueryEscape(fields))
 		if pageToken != "" {
 			urlStr += "&pageToken=" + url.QueryEscape(pageToken)
@@ -231,7 +242,7 @@ func (d *GDriveDriver) OpenFile(mountID int, path string) (io.ReadCloser, error)
 	}
 
 	meta, err := d.apiGET(fmt.Sprintf(
-		"https://www.googleapis.com/drive/v3/files/%s?fields=mimeType", driveID))
+		driveBase+"/files/%s?fields=mimeType", driveID))
 	if err != nil {
 		return nil, err
 	}
@@ -240,10 +251,10 @@ func (d *GDriveDriver) OpenFile(mountID int, path string) (io.ReadCloser, error)
 	var urlStr string
 	if strings.HasPrefix(mimeType, "application/vnd.google-apps.") {
 		urlStr = fmt.Sprintf(
-			"https://www.googleapis.com/drive/v3/files/%s/export?mimeType=%s",
+			driveBase+"/files/%s/export?mimeType=%s",
 			driveID, url.QueryEscape(exportMimeFor(mimeType)))
 	} else {
-		urlStr = fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media", driveID)
+		urlStr = fmt.Sprintf(driveBase+"/files/%s?alt=media", driveID)
 	}
 
 	resp, err := d.apiRawGET(urlStr)
@@ -304,7 +315,7 @@ func (d *GDriveDriver) Mkdir(mountID int, path string) error {
 		"parents":  []string{parentID},
 	})
 	res, err := d.apiJSON("POST",
-		"https://www.googleapis.com/drive/v3/files?fields=id",
+		driveBase+"/files?fields=id",
 		body)
 	if err != nil {
 		return err
@@ -330,7 +341,7 @@ func (d *GDriveDriver) Remove(mountID int, path string) error {
 	}
 
 	if err := d.apiDELETE(fmt.Sprintf(
-		"https://www.googleapis.com/drive/v3/files/%s", driveID)); err != nil {
+		driveBase+"/files/%s", driveID)); err != nil {
 		return err
 	}
 	d.cacheDelete(p)
@@ -355,7 +366,7 @@ func (d *GDriveDriver) Rename(mountID int, oldPath, newPath string) error {
 	oldParent, _ := splitParent(op)
 	newParent, newName := splitParent(np)
 
-	urlStr := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=id", driveID)
+	urlStr := fmt.Sprintf(driveBase+"/files/%s?fields=id", driveID)
 
 	if oldParent != newParent {
 		oldParentID, err := d.resolvePath(oldParent)
@@ -423,7 +434,7 @@ func (d *GDriveDriver) validateToken() error {
 	d.tokenMu.Unlock()
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET",
-		"https://www.googleapis.com/oauth2/v1/tokeninfo?access_token="+url.QueryEscape(tok), nil)
+		tokenInfoURL+"?access_token="+url.QueryEscape(tok), nil)
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -442,7 +453,7 @@ func (d *GDriveDriver) doRefresh() error {
 		"client_id":     {d.clientID},
 		"client_secret": {d.clientSecret},
 	}
-	resp, err := d.httpClient.PostForm("https://oauth2.googleapis.com/token", data)
+	resp, err := d.httpClient.PostForm(tokenURL, data)
 	if err != nil {
 		return err
 	}
@@ -651,12 +662,12 @@ func (d *GDriveDriver) uploadFile(path string, data []byte) error {
 	if existingID != "" {
 		meta = map[string]interface{}{"name": name}
 		urlStr = fmt.Sprintf(
-			"https://www.googleapis.com/upload/drive/v3/files/%s?uploadType=multipart&fields=id",
+			uploadBase+"/files/%s?uploadType=multipart&fields=id",
 			existingID)
 		method = "PATCH"
 	} else {
 		meta = map[string]interface{}{"name": name, "parents": []string{parentID}}
-		urlStr = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id"
+		urlStr = uploadBase + "/files?uploadType=multipart&fields=id"
 		method = "POST"
 	}
 
@@ -739,7 +750,7 @@ func (d *GDriveDriver) resolvePath(path string) (string, error) {
 		escaped := strings.ReplaceAll(comp, "'", "\\'")
 		query := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false", currentID, escaped)
 		urlStr := fmt.Sprintf(
-			"https://www.googleapis.com/drive/v3/files?q=%s&fields=files(id)&pageSize=1",
+			driveBase+"/files?q=%s&fields=files(id)&pageSize=1",
 			url.QueryEscape(query))
 
 		result, err := d.apiGET(urlStr)
