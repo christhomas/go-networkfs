@@ -57,6 +57,24 @@ jobs:
       - name: SMB integration tests
         run: make test-smb
 
+  c-abi:
+    name: C ABI harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      # The archives are what ship, and until now nothing exercised them as a
+      # consumer does. This links each one from C and calls its exported
+      # functions, which is also the only way to reach the entry points taking
+      # a ByteSlice or a size_t: a Go test file may not import "C".
+      - name: C ABI tests
+        run: make test-cabi
+
   lint:
     name: lint
     runs-on: ubuntu-latest

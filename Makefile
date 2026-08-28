@@ -6,6 +6,7 @@
 #   test-smb          SMB driver integration tests against a Samba container
 #   test-s3           S3 driver integration tests against a MinIO container
 #   test-integration  every driver's integration tests, with coverage
+#   test-cabi         the C ABI, exercised from C against a real server
 #   bench             run benchmarks against the FTP driver
 #   coverage-html     open an HTML coverage report in the browser
 #   archives          build all driver c-archives (lib<name>.a) plus the
@@ -37,6 +38,19 @@ S3_SECRET     ?= minioadmin
 
 # Tags for every driver whose integration tests need a server.
 INTEGRATION_TAGS ?= smb_integration,s3_integration
+
+# The C ABI harness. It links the shipped archive and calls the exported
+# functions the way a consumer does, which is the only way to reach the three
+# entry points taking a ByteSlice or a size_t: a Go test file may not import
+# "C", so it cannot name either type.
+CABI_DIR   ?= build/cabi
+CABI_COVER ?= build/cabi-cover
+UNAME_S    := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+CABI_LDLIBS ?= -framework CoreFoundation -framework Security
+else
+CABI_LDLIBS ?= -lpthread -ldl -lresolv
+endif
 
 .PHONY: all
 all: test archives tui
@@ -76,6 +90,10 @@ minio-up:
 		-e MINIO_ROOT_USER=$(S3_KEY) -e MINIO_ROOT_PASSWORD=$(S3_SECRET) \
 		$(S3_IMAGE) server /data
 	$(call wait_for_port,$(S3_CONTAINER),$(S3_PORT))
+	@# MinIO's filesystem backend stores a bucket as a directory, so this is
+	@# enough to create one without pulling in the mc client. The Go tests make
+	@# their own bucket through the API; the C harness has no way to.
+	@docker exec $(S3_CONTAINER) mkdir -p /data/$(S3_BUCKET)
 
 .PHONY: minio-down
 minio-down:
@@ -111,9 +129,81 @@ test-integration: samba-up minio-up
 		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
 		$(GO) test -count=1 -tags=$(INTEGRATION_TAGS) \
 			-covermode=atomic -coverprofile=$(COVERAGE) ./... ; \
+		status=$$? ; \
+		if [ $$status -ne 0 ]; then $(MAKE) samba-down minio-down ; exit $$status; fi
+	@# The C harnesses need both servers still up: the SMB and S3 archives
+	@# mount against them, which is the only way to reach the success paths.
+	@$(MAKE) --no-print-directory cabi-cover ; \
 		status=$$? ; $(MAKE) samba-down minio-down ; \
 		if [ $$status -ne 0 ]; then exit $$status; fi
 	@$(GO) tool cover -func=$(COVERAGE) | tail -1
+
+# Run the C harness against the already-running Samba and fold its profile
+# into $(COVERAGE). The C ABI is the only caller of some of this code, so
+# leaving it out understates what is actually tested.
+.PHONY: cabi-cover
+cabi-cover: cabi-drivers cabi-unified
+	@$(GO) tool covdata textfmt -i=$(CABI_COVER) -o $(CABI_DIR)/unified.out
+	@test/cabi/merge-coverage.sh $(CABI_DIR)/merged.out $(COVERAGE) \
+		$(CABI_DIR)/unified.out $(CABI_DIR)/drivers/*.out
+	@mv $(CABI_DIR)/merged.out $(COVERAGE)
+
+# The C ABI harnesses. Each links one shipped archive and calls its exported
+# functions the way a consumer does.
+#
+# A c-archive has no Go main, so the runtime never writes its coverage counters
+# on the way out. The archives are built with the `coverage` tag, which adds an
+# export the unified harness calls to flush them, and with -covermode=atomic,
+# which is what WriteCountersDir requires. The per-driver archives have no such
+# export, so they are built and run without coverage: what they prove is that
+# the archive links and the ABI behaves, which does not depend on measuring it.
+.PHONY: test-cabi
+test-cabi: samba-up minio-up
+	@$(MAKE) --no-print-directory cabi-drivers
+	@$(MAKE) --no-print-directory cabi-unified ; \
+		status=$$? ; $(MAKE) samba-down minio-down ; exit $$status
+
+# The eight per-driver archives, unmounted. These reach openfile, writefile and
+# setOutBytes, which no Go test can call.
+#
+# Each archive gets its own coverage directory: they are separate programs with
+# separate metadata, and mixing their counters in one directory is not
+# something covdata is asked to untangle.
+.PHONY: cabi-drivers
+cabi-drivers:
+	@rm -rf $(CABI_DIR)/drivers ; mkdir -p $(CABI_DIR)/drivers
+	@for d in $(ARCHIVES); do \
+		mkdir -p $(CABI_DIR)/drivers/cov-$$d ; \
+		$(GO) build -cover -covermode=atomic -tags coverage -buildmode=c-archive \
+			-o $(CABI_DIR)/drivers/lib$$d.a ./$$d/cmd/$$d || exit 1 ; \
+		$(CC) -DNETWORKFS_COVERAGE -o $(CABI_DIR)/drivers/test_$$d test/cabi/test_$$d.c \
+			-I$(CABI_DIR)/drivers $(CABI_DIR)/drivers/lib$$d.a $(CABI_LDLIBS) || exit 1 ; \
+		case $$d in \
+			smb) cfg='{"host":"127.0.0.1","port":"$(SMB_PORT)","share":"tmp","user":"smbuser","pass":"Smbpasswd12345"}' ;; \
+			s3)  cfg='{"endpoint":"127.0.0.1:$(S3_PORT)","bucket":"$(S3_BUCKET)","access_key_id":"$(S3_KEY)","secret_access_key":"$(S3_SECRET)","secure":"false","use_path_style":"true"}' ;; \
+			*)   cfg='' ;; \
+		esac ; \
+		CABI_CONFIG="$$cfg" GOCOVERDIR=$(CABI_DIR)/drivers/cov-$$d \
+			$(CABI_DIR)/drivers/test_$$d || exit 1 ; \
+		$(GO) tool covdata textfmt -i=$(CABI_DIR)/drivers/cov-$$d \
+			-o $(CABI_DIR)/drivers/$$d.out || exit 1 ; \
+	done
+
+# The unified archive, with coverage, against a real server. Assumes Samba is
+# already up.
+.PHONY: cabi-unified
+cabi-unified:
+	@rm -rf $(CABI_DIR)/unified $(CABI_COVER)
+	@mkdir -p $(CABI_DIR)/unified $(CABI_COVER)
+	@$(GO) build -cover -covermode=atomic -tags coverage \
+		-buildmode=c-archive -o $(CABI_DIR)/unified/libnetworkfs.a ./cmd/networkfs
+	@$(CC) -DNETWORKFS_COVERAGE -o $(CABI_DIR)/unified/test_networkfs \
+		test/cabi/test_networkfs.c -I$(CABI_DIR)/unified \
+		$(CABI_DIR)/unified/libnetworkfs.a $(CABI_LDLIBS)
+	@GOCOVERDIR=$(CABI_COVER) \
+		SMB_HOST=127.0.0.1 SMB_PORT=$(SMB_PORT) SMB_SHARE=tmp \
+		SMB_USER=smbuser SMB_PASS=Smbpasswd12345 \
+		$(CABI_DIR)/unified/test_networkfs
 
 .PHONY: bench
 bench:
