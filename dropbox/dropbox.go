@@ -9,14 +9,25 @@ package dropbox
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
 	dbx "github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
+	"golang.org/x/oauth2"
 )
+
+// invalidGrantField matches the OAuth-structured `error: "invalid_grant"`
+// field, allowing for any whitespace the JSON encoder might produce.
+// Used instead of a raw substring check so an `error_description`
+// that mentions "invalid_grant" doesn't false-positive into the
+// reauth path.
+var invalidGrantField = regexp.MustCompile(`"error"\s*:\s*"invalid_grant"`)
 
 // Driver type ID - must match dispatcher registry
 const DriverTypeID = 4
@@ -30,9 +41,11 @@ func init() {
 
 // DropboxDriver implements the Driver interface for Dropbox connections
 type DropboxDriver struct {
-	connected   bool
-	accessToken string
-	client      files.Client
+	connected bool
+	client    files.Client
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier
@@ -40,38 +53,99 @@ func (d *DropboxDriver) Name() string {
 	return "dropbox"
 }
 
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *DropboxDriver) Stats() *api.MountStats { return d.stats }
+
 // Mount sets up the Dropbox API client.
 //
-// Config keys:
+// Config shapes (in priority order):
 //
-//	access_token - Dropbox API token (required)
-//	api_base_url - optional. Sends every request to this base instead of the
-//	               live API, which is what lets the driver be pointed at a
-//	               mock. The SDK builds its URLs as https://<host>.dropbox.com,
-//	               with the host varying by route, so the substitute has to
-//	               replace the whole generator rather than just a domain: the
-//	               host type is carried in the path so a mock can still tell
-//	               an API call from a content transfer.
+//  1. {app_key, refresh_token} — current PKCE flow. We wrap an
+//     oauth2.Config with the app_key and Dropbox's token endpoint;
+//     the SDK gets an *http.Client that auto-refreshes the access
+//     token on expiry. No persisted access_token.
+//
+//  2. {access_token} — legacy long-lived token. Still accepted so
+//     existing mounts keep working until the user re-authenticates;
+//     remove once we've shipped the OAuth flow for a release.
+//
+// Mount fails if neither shape is present.
+// applyAPIBase points the SDK at a substitute for the live API when
+// api_base_url is set, which is what lets the driver be tested, or run against
+// a mock, without Dropbox.
+//
+// It replaces the whole URL generator rather than setting Domain, because the
+// SDK hardcodes https and varies the host by route. The host type is carried
+// in the path so a substitute can still tell an API call from a content
+// transfer.
+func applyAPIBase(cfg *dbx.Config, base string) {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		return
+	}
+	cfg.URLGenerator = func(hostType, namespace, route string) string {
+		return fmt.Sprintf("%s/%s/2/%s/%s", base, hostType, namespace, route)
+	}
+}
+
 func (d *DropboxDriver) Mount(mountID int, config map[string]string) error {
-	token, ok := config["access_token"]
-	if !ok || token == "" {
-		return &api.DriverError{Code: 10, Message: "config missing 'access_token'"}
-	}
+	appKey := config["app_key"]
+	refreshToken := config["refresh_token"]
+	legacyToken := config["access_token"]
 
-	d.accessToken = token
+	d.stats = &api.MountStats{}
 
-	cfg := dbx.Config{
-		Token:    token,
-		LogLevel: dbx.LogInfo,
-	}
-	if base := strings.TrimRight(config["api_base_url"], "/"); base != "" {
-		cfg.URLGenerator = func(hostType, namespace, route string) string {
-			return fmt.Sprintf("%s/%s/2/%s/%s", base, hostType, namespace, route)
+	if appKey != "" && refreshToken != "" {
+		// Modern PKCE flow. The oauth2.Token starts with no
+		// AccessToken — the TokenSource immediately refreshes on
+		// the first request because Expiry is zero (treated as
+		// already-expired). Subsequent calls reuse the cached
+		// access token until it ages out.
+		oauthConf := &oauth2.Config{
+			ClientID: appKey,
+			Endpoint: oauth2.Endpoint{
+				TokenURL: "https://api.dropbox.com/oauth2/token",
+			},
 		}
+		tok := &oauth2.Token{
+			RefreshToken: refreshToken,
+			// AccessToken left empty + Expiry zero ⇒ first call
+			// triggers a refresh.
+		}
+		// Wrap the OAuth-refreshing client so our CountingTransport
+		// sees every request (including the silent token-refresh POSTs
+		// the oauth2 transport issues).
+		httpClient := api.WrapHTTPClient(oauthConf.Client(context.Background(), tok), d.stats)
+		cfg := dbx.Config{
+			Client:   httpClient,
+			LogLevel: dbx.LogInfo,
+		}
+		applyAPIBase(&cfg, config["api_base_url"])
+		d.client = files.New(cfg)
+		d.connected = true
+		return nil
 	}
-	d.client = files.New(cfg)
-	d.connected = true
-	return nil
+
+	if legacyToken != "" {
+		// Provide our own HTTP client so the SDK's transport flows
+		// through the byte counter. The SDK still owns auth (it adds
+		// the Bearer header from cfg.Token).
+		cfg := dbx.Config{
+			Token:    legacyToken,
+			Client:   api.WrapHTTPClient(nil, d.stats),
+			LogLevel: dbx.LogInfo,
+		}
+		applyAPIBase(&cfg, config["api_base_url"])
+		d.client = files.New(cfg)
+		d.connected = true
+		return nil
+	}
+
+	return &api.DriverError{
+		Code:    10,
+		Message: "config missing credentials: provide {app_key, refresh_token} (preferred) or legacy {access_token}",
+	}
 }
 
 // Unmount is a no-op for Dropbox (HTTP-based, no persistent connection)
@@ -95,16 +169,47 @@ func dbxPath(path string) string {
 }
 
 // wrapDbxError adds a helpful hint when the Dropbox API reports a
-// missing_scope error.
+// missing_scope error, and surfaces dead-refresh-token failures with
+// the `oauth_reauth_required:` prefix so the host-side supervisor can
+// auto-trigger an OAuth re-authorise flow without the user touching
+// settings.
+//
+// Dropbox's PKCE refresh flow lives inside golang.org/x/oauth2 — token
+// refreshes happen lazily on the first API call, so an invalid refresh
+// token surfaces as an `oauth2.RetrieveError`-shaped string with body
+// `{"error":"invalid_grant"…}` rather than a Mount-time failure.
+//
+// Reauth detection prefers the typed `*oauth2.RetrieveError` (parsing
+// `Body` for the structured `error` field), and falls back to a
+// regex over the formatted message that matches the same OAuth field
+// shape — never a bare substring, which would false-positive on an
+// `invalid_client` whose `error_description` happens to mention
+// `invalid_grant`.
 func wrapDbxError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if isInvalidGrant(err) {
+		return fmt.Errorf("oauth_reauth_required: %s", err.Error())
 	}
 	msg := err.Error()
 	if strings.Contains(msg, "missing_scope") {
 		return fmt.Errorf("Dropbox API error: missing required permission scope. Please check your app's permissions and access token. (error: %s)", msg)
 	}
 	return err
+}
+
+// isInvalidGrant reports whether err carries an OAuth `invalid_grant`
+// signal in its structured `error` field (not just anywhere in the
+// payload). Tries the typed *oauth2.RetrieveError first; falls back
+// to a regex over the formatted message for SDK-wrapped errors that
+// don't expose the typed value.
+func isInvalidGrant(err error) bool {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && invalidGrantField.Match(re.Body) {
+		return true
+	}
+	return invalidGrantField.MatchString(err.Error())
 }
 
 // nameFromPath extracts the trailing component of a path.
@@ -290,4 +395,58 @@ func (d *DropboxDriver) Rename(mountID int, oldPath, newPath string) error {
 	arg := files.NewRelocationArg(dbxPath(oldPath), dbxPath(newPath))
 	_, err := d.client.MoveV2(arg)
 	return wrapDbxError(err)
+}
+
+// thumbnailBucketTag returns the Dropbox ThumbnailSize tag value for
+// the smallest provider bucket >= sizePx (long edge). Falls back to
+// the largest bucket for unreasonably large requests.
+func thumbnailBucketTag(sizePx int) string {
+	switch {
+	case sizePx <= 32:
+		return files.ThumbnailSizeW32h32
+	case sizePx <= 64:
+		return files.ThumbnailSizeW64h64
+	case sizePx <= 128:
+		return files.ThumbnailSizeW128h128
+	case sizePx <= 256:
+		return files.ThumbnailSizeW256h256
+	case sizePx <= 480:
+		return files.ThumbnailSizeW480h320
+	case sizePx <= 640:
+		return files.ThumbnailSizeW640h480
+	case sizePx <= 960:
+		return files.ThumbnailSizeW960h640
+	case sizePx <= 1024:
+		return files.ThumbnailSizeW1024h768
+	default:
+		return files.ThumbnailSizeW2048h1536
+	}
+}
+
+// GetThumbnail implements api.Thumbnailer for Dropbox using the
+// files/get_thumbnail_v2 endpoint. Returns JPEG bytes.
+func (d *DropboxDriver) GetThumbnail(mountID int, path string, sizePx int) ([]byte, error) {
+	if !d.connected || d.client == nil {
+		return nil, api.ErrNotConnected
+	}
+
+	resource := &files.PathOrLink{
+		Tagged: dbx.Tagged{Tag: files.PathOrLinkPath},
+		Path:   dbxPath(path),
+	}
+	arg := files.NewThumbnailV2Arg(resource)
+	arg.Format = &files.ThumbnailFormat{Tagged: dbx.Tagged{Tag: files.ThumbnailFormatJpeg}}
+	arg.Size = &files.ThumbnailSize{Tagged: dbx.Tagged{Tag: thumbnailBucketTag(sizePx)}}
+
+	_, content, err := d.client.GetThumbnailV2(arg)
+	if err != nil {
+		return nil, wrapDbxError(err)
+	}
+	defer content.Close()
+
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return nil, wrapDbxError(err)
+	}
+	return data, nil
 }

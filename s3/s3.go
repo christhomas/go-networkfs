@@ -40,12 +40,19 @@ type S3Driver struct {
 	// prefix is either "" or "something/". Paths from callers are
 	// joined onto it: "/a/b" -> prefix + "a/b".
 	prefix string
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier.
 func (d *S3Driver) Name() string {
 	return "s3"
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *S3Driver) Stats() *api.MountStats { return d.stats }
 
 // Mount establishes an S3 client.
 //
@@ -82,10 +89,23 @@ func (d *S3Driver) Mount(mountID int, config map[string]string) error {
 		region = "us-east-1"
 	}
 
+	d.stats = &api.MountStats{}
+
+	// Base the byte counter on minio's own tuned DefaultTransport
+	// (DisableCompression, S3-friendly idle/keepalive timeouts, optional
+	// SSL_CERT_FILE handling) rather than http.DefaultTransport — passing
+	// our wrapper via Options.Transport replaces the SDK's transport
+	// entirely, so we have to re-supply the same base it would have built.
+	baseTransport, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return &api.DriverError{Code: 12, Message: "s3 default transport: " + err.Error()}
+	}
+
 	opts := &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, config["session_token"]),
-		Secure: secure,
-		Region: region,
+		Creds:     credentials.NewStaticV4(accessKey, secretKey, config["session_token"]),
+		Secure:    secure,
+		Region:    region,
+		Transport: api.NewCountingTransport(baseTransport, d.stats),
 	}
 	if strings.EqualFold(config["use_path_style"], "true") {
 		opts.BucketLookup = minio.BucketLookupPath

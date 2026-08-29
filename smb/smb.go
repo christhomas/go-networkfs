@@ -41,12 +41,23 @@ type SMBDriver struct {
 	conn      net.Conn
 	session   *smb2.Session
 	shareFS   *smb2.Share
+	// Per-mount transport counters fed by api.CountingConn. The
+	// host-side IOStatsCollector polls a Snapshot() each tick. The
+	// SMB protocol does its own framing on top of TCP — we count
+	// every byte that traverses the socket regardless of whether
+	// SMB encryption is negotiated, which matches what an external
+	// monitor would observe.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier
 func (d *SMBDriver) Name() string {
 	return "smb"
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand our
+// transport counters back through the C ABI.
+func (d *SMBDriver) Stats() *api.MountStats { return d.stats }
 
 // Mount establishes the SMB connection, session and mounts the share.
 // Config expects: host, port, user, pass, share, root
@@ -84,6 +95,7 @@ func (d *SMBDriver) Mount(mountID int, config map[string]string) error {
 	d.pass = pass
 	d.share = shareName
 	d.rootPath = rootPath
+	d.stats = &api.MountStats{}
 
 	if err := d.connect(); err != nil {
 		return &api.DriverError{Code: 12, Message: "connection failed: " + err.Error()}
@@ -96,10 +108,15 @@ func (d *SMBDriver) Mount(mountID int, config map[string]string) error {
 func (d *SMBDriver) connect() error {
 	addr := net.JoinHostPort(d.host, strconv.Itoa(d.port))
 
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	rawConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to dial SMB: %w", err)
 	}
+	// Wrap before handing the conn to go-smb2 so every byte the SMB
+	// stack reads/writes is counted. SMB2/3 may negotiate session
+	// encryption later — we still count the encrypted bytes that
+	// actually go on the wire.
+	conn := api.WrapConn(rawConn, d.stats)
 
 	dialer := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{

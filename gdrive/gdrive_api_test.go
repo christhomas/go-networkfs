@@ -61,7 +61,7 @@ func newFakeDrive(t *testing.T) *fakeDrive {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"access_token":"tok-%d","expires_in":3600}`, f.tokens)
 			return
-		case "/tokeninfo":
+		case "/oauth2/v1/tokeninfo":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"expires_in":3600}`)
 			return
@@ -71,15 +71,6 @@ func newFakeDrive(t *testing.T) *fakeDrive {
 
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
-
-	oldDrive, oldUpload, oldInfo, oldToken := driveBase, uploadBase, tokenInfoURL, tokenURL
-	driveBase = f.server.URL + "/drive/v3"
-	uploadBase = f.server.URL + "/upload/drive/v3"
-	tokenInfoURL = f.server.URL + "/tokeninfo"
-	tokenURL = f.server.URL + "/token"
-	t.Cleanup(func() {
-		driveBase, uploadBase, tokenInfoURL, tokenURL = oldDrive, oldUpload, oldInfo, oldToken
-	})
 
 	return f
 }
@@ -117,6 +108,7 @@ func mountFake(t *testing.T, f *fakeDrive) *GDriveDriver {
 		"client_id":     "cid",
 		"client_secret": "csec",
 		"refresh_token": "rtok",
+		"api_base_url":  f.server.URL,
 	})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -152,6 +144,7 @@ func TestMountValidatesSuppliedAccessToken(t *testing.T) {
 	err := d.Mount(1, map[string]string{
 		"client_id": "cid", "client_secret": "csec",
 		"refresh_token": "rtok", "access_token": "supplied",
+		"api_base_url": f.server.URL,
 	})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -166,12 +159,13 @@ func TestMountValidatesSuppliedAccessToken(t *testing.T) {
 
 func TestMountRefreshesWhenSuppliedTokenIsRejected(t *testing.T) {
 	f := newFakeDrive(t)
-	f.json("GET /tokeninfo", http.StatusBadRequest, `{"error":"invalid_token"}`)
+	f.json("GET /oauth2/v1/tokeninfo", http.StatusBadRequest, `{"error":"invalid_token"}`)
 
 	d := &GDriveDriver{}
 	err := d.Mount(1, map[string]string{
 		"client_id": "cid", "client_secret": "csec",
 		"refresh_token": "rtok", "access_token": "stale",
+		"api_base_url": f.server.URL,
 	})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -190,6 +184,7 @@ func TestMountFailsWhenRefreshFails(t *testing.T) {
 	d := &GDriveDriver{}
 	err := d.Mount(1, map[string]string{
 		"client_id": "cid", "client_secret": "csec", "refresh_token": "bad",
+		"api_base_url": f.server.URL,
 	})
 	if err == nil {
 		_ = d.Unmount(1)

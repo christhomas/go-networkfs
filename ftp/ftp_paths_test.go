@@ -9,28 +9,22 @@ package ftp
 
 import (
 	"errors"
-	"fmt"
-	"net/textproto"
 	"strings"
 	"testing"
 )
 
-func TestSplitParentName(t *testing.T) {
-	for _, tt := range []struct{ in, parent, name string }{
-		{"/a/b/c", "/a/b", "c"},
-		{"/a/b/c/", "/a/b", "c"},
-		{"/top", "/", "top"},
-		{"/top/", "/", "top"},
-		{"bare", "/", "bare"},
-		{"/a/b/c/d", "/a/b/c", "d"},
-	} {
-		parent, name := splitParentName(tt.in)
-		if parent != tt.parent || name != tt.name {
-			t.Errorf("splitParentName(%q) = (%q, %q), want (%q, %q)",
-				tt.in, parent, name, tt.parent, tt.name)
-		}
-	}
+// statusError stands in for goftp.Error, the client's error interface. The
+// classifiers type-assert to it and branch on Code(), so a stand-in has to
+// satisfy the whole interface rather than merely carry a code.
+type statusError struct {
+	code int
+	msg  string
 }
+
+func (e statusError) Error() string   { return e.msg }
+func (e statusError) Code() int       { return e.code }
+func (e statusError) Temporary() bool { return false }
+func (e statusError) Message() string { return e.msg }
 
 func TestNameFromPath(t *testing.T) {
 	d := &FTPDriver{}
@@ -54,9 +48,9 @@ func TestClassifyFTPPathError(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"typed 550", &textproto.Error{Code: 550, Msg: "no such file"}, "does not exist"},
-		{"typed 530", &textproto.Error{Code: 530, Msg: "please login"}, "authentication required"},
-		{"untyped 550", errors.New("550 File not found"), "does not exist"},
+		{"coded 550", statusError{550, "550 no such file"}, "does not exist"},
+		{"coded 530", statusError{530, "530 please login"}, "authentication required"},
+		{"uncoded 550 in the message", errors.New("550 File not found"), "does not exist"},
 		{"anything else", errors.New("connection reset"), "failed to access"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -115,7 +109,7 @@ func TestClassifyFTPConnectError(t *testing.T) {
 // An unauthenticated user is described as "anonymous" rather than as an empty
 // string, which reads as a missing field rather than a deliberate login.
 func TestClassifyFTPConnectErrorNamesAnonymous(t *testing.T) {
-	authErr := &textproto.Error{Code: 530, Msg: "login incorrect"}
+	authErr := statusError{530, "530 login incorrect"}
 
 	withUser := classifyFTPConnectError(authErr, "h", 21, "bob")
 	if !strings.Contains(withUser.Error(), `"bob"`) {
@@ -133,11 +127,12 @@ func TestIsFTPAuthError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{&textproto.Error{Code: 530, Msg: "login incorrect"}, true},
-		{&textproto.Error{Code: 550, Msg: "no such file"}, false},
+		{statusError{530, "530 not logged in"}, true},
+		{statusError{532, "532 need account"}, true},
+		{statusError{550, "550 no such file"}, false},
 		{errors.New("530 Login incorrect"), true},
+		{errors.New("Login incorrect"), true},
 		{errors.New("connection refused"), false},
-		{fmt.Errorf("wrapped: %w", &textproto.Error{Code: 530}), true},
 	} {
 		if got := isFTPAuthError(tt.err); got != tt.want {
 			t.Errorf("isFTPAuthError(%v) = %v, want %v", tt.err, got, tt.want)

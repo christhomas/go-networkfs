@@ -178,6 +178,23 @@ func TestIntegrationCreateReadStatRemove(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "hello.txt")); !os.IsNotExist(err) {
 		t.Errorf("file still exists: %v", err)
 	}
+
+	// The CountingTransport wired into gowebdav in Mount() should have
+	// observed the GET (Stat / OpenFile) and PUT (CreateFile) traffic.
+	// We don't pin exact byte counts because gowebdav adds locking, auth
+	// probing, and PROPFIND payloads of indeterminate size — only that
+	// non-zero traffic flowed in both directions.
+	stats := d.Stats()
+	if stats == nil {
+		t.Fatal("Stats() returned nil")
+	}
+	br, bw, or, ow := stats.Snapshot()
+	if br == 0 {
+		t.Errorf("BytesRead = 0, want > 0 (snapshot: r=%d w=%d opR=%d opW=%d)", br, bw, or, ow)
+	}
+	if ow == 0 {
+		t.Errorf("OpsWritten = 0, want > 0 (snapshot: r=%d w=%d opR=%d opW=%d)", br, bw, or, ow)
+	}
 }
 
 func TestIntegrationMkdirAndRename(t *testing.T) {
@@ -276,3 +293,7 @@ func TestIntegrationStreamingWrite(t *testing.T) {
 // Guard that the handler type we depend on actually exists — silences
 // "imported and not used" if the test file is ever trimmed.
 var _ http.Handler = (*webdav.Handler)(nil)
+
+// Compile-time guard that WebDAVDriver satisfies api.StatsProvider so a
+// future refactor can't silently drop the per-mount byte counters.
+var _ api.StatsProvider = (*WebDAVDriver)(nil)

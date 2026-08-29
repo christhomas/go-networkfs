@@ -43,12 +43,19 @@ type WebDAVDriver struct {
 	pass       string
 	pathPrefix string
 	client     *gowebdav.Client
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier
 func (d *WebDAVDriver) Name() string {
 	return "webdav"
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *WebDAVDriver) Stats() *api.MountStats { return d.stats }
 
 // Mount establishes a WebDAV client.
 //
@@ -108,6 +115,15 @@ func (d *WebDAVDriver) Mount(mountID int, config map[string]string) (err error) 
 	d.pathPrefix = pathPrefix
 
 	d.client = gowebdav.NewClient(baseURL, user, pass)
+
+	// Wire a CountingTransport into gowebdav's underlying http.Client so
+	// every PROPFIND / GET / PUT / MKCOL / DELETE flows through our
+	// per-mount byte counters. SetTransport assigns directly to the
+	// client's *http.Client.Transport — passing nil as the base lets
+	// CountingTransport fall back to http.DefaultTransport, matching the
+	// gowebdav default (it never sets one explicitly).
+	d.stats = &api.MountStats{}
+	d.client.SetTransport(api.NewCountingTransport(nil, d.stats))
 
 	// Optional: validate with Connect (may no-op depending on server).
 	if connErr := d.client.Connect(); connErr != nil {

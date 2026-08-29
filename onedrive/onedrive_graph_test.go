@@ -70,12 +70,6 @@ func newFakeGraph(t *testing.T) *fakeGraph {
 	g.server = httptest.NewServer(mux)
 	t.Cleanup(g.server.Close)
 
-	// Point the driver at the fake for the duration of the test.
-	oldBase, oldToken := graphBase, tokenURL
-	graphBase = g.server.URL + "/v1.0"
-	tokenURL = g.server.URL + "/token"
-	t.Cleanup(func() { graphBase, tokenURL = oldBase, oldToken })
-
 	return g
 }
 
@@ -108,6 +102,7 @@ func mountFake(t *testing.T, g *fakeGraph) *OneDriveDriver {
 		"client_id":     "cid",
 		"client_secret": "secret",
 		"refresh_token": "rtok",
+		"api_base_url":  g.server.URL,
 	})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -139,7 +134,9 @@ func TestMountFailsWhenTokenRefreshFails(t *testing.T) {
 	g.json("POST /token", http.StatusUnauthorized, `{"error":"invalid_grant"}`)
 
 	d := &OneDriveDriver{}
-	err := d.Mount(1, map[string]string{"client_id": "cid", "refresh_token": "bad"})
+	err := d.Mount(1, map[string]string{
+		"client_id": "cid", "refresh_token": "bad", "api_base_url": g.server.URL,
+	})
 	if err == nil {
 		t.Fatal("mount succeeded with a rejected refresh token")
 	}

@@ -17,9 +17,12 @@ package dropbox
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
+	"golang.org/x/oauth2"
 )
 
 func TestDriverTypeID(t *testing.T) {
@@ -203,6 +206,140 @@ func TestWrapDbxError(t *testing.T) {
 	if msg := got.Error(); msg == "" ||
 		!containsAll(msg, "missing required permission scope", "missing_scope") {
 		t.Errorf("wrapped message lacks expected text: %q", msg)
+	}
+}
+
+// retrieveErr constructs an *oauth2.RetrieveError suitable for tests.
+// A non-nil Response is required because the type's Error() method
+// dereferences r.Response.Status; tests that exercise the typed-body
+// path don't depend on Error() but it's safer to keep the value
+// usable as a real error.
+func retrieveErr(status int, body string) *oauth2.RetrieveError {
+	return &oauth2.RetrieveError{
+		Response: &http.Response{StatusCode: status, Status: fmt.Sprintf("%d", status)},
+		Body:     []byte(body),
+	}
+}
+
+// TestIsInvalidGrant locks the field-aware detection contract.
+//
+// The function is the load-bearing OAuth signal used by the host
+// supervisor to auto-pop a re-auth flow, so a false positive (popping
+// the browser when the token is fine) and a false negative (silent
+// dead mount) are both bad. Cases below cover the two paths
+// `isInvalidGrant` exposes — typed `*oauth2.RetrieveError` and
+// formatted-message fallback — plus the false-positive guard for
+// `invalid_grant` strings appearing inside `error_description`.
+func TestIsInvalidGrant(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "typed RetrieveError, structured invalid_grant body",
+			err:  retrieveErr(400, `{"error":"invalid_grant","error_description":"Token has been expired or revoked."}`),
+			want: true,
+		},
+		{
+			name: "typed RetrieveError, invalid_client body",
+			err:  retrieveErr(401, `{"error":"invalid_client","error_description":"Bad client credentials"}`),
+			want: false,
+		},
+		{
+			name: "typed RetrieveError, invalid_grant only in error_description",
+			err:  retrieveErr(400, `{"error":"invalid_client","error_description":"Some text mentioning invalid_grant for context"}`),
+			want: false,
+		},
+		{
+			name: "wrapped string fallback, structured invalid_grant in message",
+			err:  fmt.Errorf("dbx: refresh failed: oauth2: cannot fetch token: 400 Bad Request\nResponse: {\"error\":\"invalid_grant\"}"),
+			want: true,
+		},
+		{
+			name: "wrapped string fallback, whitespace between field and value",
+			err:  fmt.Errorf(`dbx: refresh failed: {"error" : "invalid_grant"}`),
+			want: true,
+		},
+		{
+			name: "wrapped string fallback, bare invalid_grant substring (not in field shape)",
+			err:  fmt.Errorf("an unrelated message that happens to contain invalid_grant somewhere"),
+			want: false,
+		},
+		{
+			name: "wrapped string fallback, invalid_grant only in error_description",
+			err:  fmt.Errorf(`dbx: refresh failed: {"error":"invalid_client","error_description":"docs mention invalid_grant"}`),
+			want: false,
+		},
+		{
+			name: "unrelated error",
+			err:  fmt.Errorf("network unreachable"),
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInvalidGrant(tc.err); got != tc.want {
+				t.Errorf("isInvalidGrant(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWrapDbxError_OAuthReauth locks the supervisor-facing contract:
+// when the OAuth signal is genuine, the wrapped error MUST start
+// with the `oauth_reauth_required:` prefix; when the signal is a
+// false positive (substring inside `error_description`), it MUST
+// NOT.
+func TestWrapDbxError_OAuthReauth(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		wantMarker  bool
+		wantContain string
+	}{
+		{
+			name:        "typed RetrieveError, structured invalid_grant",
+			err:         retrieveErr(400, `{"error":"invalid_grant"}`),
+			wantMarker:  true,
+			wantContain: "oauth_reauth_required:",
+		},
+		{
+			name:        "wrapped string fallback, structured invalid_grant",
+			err:         fmt.Errorf(`dbx: oauth2: {"error":"invalid_grant"}`),
+			wantMarker:  true,
+			wantContain: "oauth_reauth_required:",
+		},
+		{
+			name:        "invalid_client with invalid_grant only in error_description",
+			err:         fmt.Errorf(`dbx: oauth2: {"error":"invalid_client","error_description":"hint: invalid_grant"}`),
+			wantMarker:  false,
+			wantContain: "",
+		},
+		{
+			name:        "missing_scope still wraps with the scope hint",
+			err:         fmt.Errorf("api error: missing_scope: files.content.read"),
+			wantMarker:  false,
+			wantContain: "missing required permission scope",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapDbxError(tc.err)
+			if got == nil {
+				t.Fatal("wrapDbxError returned nil for non-nil input")
+			}
+			msg := got.Error()
+			hasMarker := strings.HasPrefix(msg, "oauth_reauth_required:")
+			if hasMarker != tc.wantMarker {
+				t.Errorf("oauth_reauth_required prefix: got %v, want %v (msg=%q)", hasMarker, tc.wantMarker, msg)
+			}
+			if tc.wantContain != "" && !strings.Contains(msg, tc.wantContain) {
+				t.Errorf("expected message to contain %q, got %q", tc.wantContain, msg)
+			}
+		})
 	}
 }
 

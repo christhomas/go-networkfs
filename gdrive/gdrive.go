@@ -34,8 +34,8 @@ func init() {
 	})
 }
 
-// Service endpoints. Variables rather than constants so tests can point the
-// driver at a local server: every request it makes is built from these four,
+// Service endpoints. Variables rather than constants so a mount can be pointed
+// at a substitute: every request this driver makes is built from these four,
 // and there is otherwise no way to exercise the request building, the token
 // refresh, the pagination or the upload paths without talking to Google.
 var (
@@ -57,6 +57,9 @@ type GDriveDriver struct {
 	accessToken string
 
 	httpClient *http.Client
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 
 	// path -> Drive file ID cache. Seeded with root aliases.
 	cacheMu   sync.Mutex
@@ -69,6 +72,10 @@ type GDriveDriver struct {
 	tokenInfoURL string
 	tokenURL     string
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *GDriveDriver) Stats() *api.MountStats { return d.stats }
 
 // Name returns the driver identifier.
 func (d *GDriveDriver) Name() string {
@@ -96,7 +103,8 @@ func (d *GDriveDriver) Mount(mountID int, config map[string]string) error {
 	d.clientSecret = clientSecret
 	d.refreshToken = refreshToken
 	d.accessToken = config["access_token"]
-	d.httpClient = &http.Client{Timeout: 30 * time.Second}
+	d.stats = &api.MountStats{}
+	d.httpClient = api.WrapHTTPClient(&http.Client{Timeout: 30 * time.Second}, d.stats)
 
 	// Endpoints default to the live service. api_base_url points them at a
 	// substitute, which is what lets the driver be tested, or run against a
@@ -410,6 +418,97 @@ func (d *GDriveDriver) Rename(mountID int, oldPath, newPath string) error {
 	return nil
 }
 
+// GetThumbnail implements api.Thumbnailer using the Drive v3 File
+// resource's `thumbnailLink` field. Drive returns a short-lived signed
+// URL pointing at Google's CDN (lh3.googleusercontent.com), with a
+// trailing `=s<bucket>` size parameter that the CDN rewrites on demand.
+// We rewrite that suffix to the requested size before fetching, so the
+// CDN crops/scales server-side and we never download the full file.
+//
+// Returns a clear error when the file has no thumbnailLink (folders,
+// freshly uploaded files Drive hasn't generated a preview for yet,
+// non-previewable types like raw binaries).
+func (d *GDriveDriver) GetThumbnail(mountID int, path string, sizePx int) ([]byte, error) {
+	if !d.connected {
+		return nil, api.ErrNotConnected
+	}
+
+	driveID, err := d.resolvePath(normPath(path))
+	if err != nil {
+		return nil, err
+	}
+
+	meta, err := d.apiGET(fmt.Sprintf(
+		d.driveBase+"/files/%s?fields=thumbnailLink,mimeType",
+		driveID))
+	if err != nil {
+		return nil, err
+	}
+	link, _ := meta["thumbnailLink"].(string)
+	if link == "" {
+		return nil, &api.DriverError{Code: 5, Message: "gdrive: no thumbnail available for " + path}
+	}
+
+	thumbURL := rewriteThumbnailSize(link, thumbnailBucket(sizePx))
+
+	// CDN URL is pre-signed; no Authorization header. Use the wrapped
+	// httpClient so bytes count toward per-mount stats.
+	req, err := http.NewRequestWithContext(context.Background(), "GET", thumbURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("thumbnail HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// thumbnailBucket rounds sizePx up to the next power-of-two bucket
+// (32, 64, 128, 256, 512, 1024, 2048). Any size works against
+// Google's CDN, but bucketing improves cache locality across requests
+// for slightly different sizes.
+func thumbnailBucket(sizePx int) int {
+	switch {
+	case sizePx <= 32:
+		return 32
+	case sizePx <= 64:
+		return 64
+	case sizePx <= 128:
+		return 128
+	case sizePx <= 256:
+		return 256
+	case sizePx <= 512:
+		return 512
+	case sizePx <= 1024:
+		return 1024
+	default:
+		return 2048
+	}
+}
+
+// rewriteThumbnailSize replaces the trailing `=s<n>` (or `=s<n>-c`,
+// etc.) on a Drive thumbnailLink with `=s<size>`. If the URL has no
+// `=s` suffix, the suffix is appended via the long-form `?sz=s<n>`
+// query parameter (`&sz=s<n>` if a query string is already present).
+// Pure function — trivially testable without a fake HTTP server.
+func rewriteThumbnailSize(link string, size int) string {
+	idx := strings.LastIndex(link, "=s")
+	if idx < 0 {
+		sep := "?"
+		if strings.Contains(link, "?") {
+			sep = "&"
+		}
+		return fmt.Sprintf("%s%ssz=s%d", link, sep, size)
+	}
+	return fmt.Sprintf("%s=s%d", link[:idx], size)
+}
+
 // --- internal helpers ------------------------------------------------------
 
 const folderMime = "application/vnd.google-apps.folder"
@@ -500,12 +599,27 @@ func (d *GDriveDriver) doRefresh() error {
 // Wire spec:
 //
 //	200 + body with {"access_token": "..."} → returns the token
-//	non-200                                   → error "refresh HTTP <code>: <body>"
+//	non-200 + JSON {"error":"invalid_grant"} → error prefixed
+//	                                            "oauth_reauth_required: …" so
+//	                                            the host-side supervisor can
+//	                                            trigger an auto re-auth flow.
+//	non-200 (other)                           → error "refresh HTTP <code>: <body>"
 //	200 + malformed JSON                      → JSON decode error
 //	200 + valid JSON but empty access_token   → returns "" and nil (caller
 //	                                             can choose to reject if it cares)
+//
+// The reauth detection inspects the structured `error` field only; a
+// substring match would false-positive when "invalid_grant" appears
+// inside `error_description` (e.g. an `invalid_client` response whose
+// description happens to mention the token).
 func parseTokenResponse(status int, body []byte) (string, error) {
 	if status != 200 {
+		var oerr struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &oerr) == nil && oerr.Error == "invalid_grant" {
+			return "", fmt.Errorf("oauth_reauth_required: refresh HTTP %d: %s", status, string(body))
+		}
 		return "", fmt.Errorf("refresh HTTP %d: %s", status, string(body))
 	}
 	var result struct {

@@ -44,12 +44,21 @@ type SFTPDriver struct {
 	useSSHAgent bool
 	sshConn     *ssh.Client
 	client      *sftp.Client
+	// Per-mount transport counters fed by api.CountingConn. The
+	// host-side IOStatsCollector polls a Snapshot() each tick. We
+	// wrap the conn before SSH negotiation so encrypted bytes (the
+	// actual wire traffic) are what's counted.
+	stats *api.MountStats
 }
 
 // Name returns the driver identifier
 func (d *SFTPDriver) Name() string {
 	return "sftp"
 }
+
+// Stats implements api.StatsProvider so the MountManager can hand our
+// transport counters back through the C ABI.
+func (d *SFTPDriver) Stats() *api.MountStats { return d.stats }
 
 // Mount establishes SFTP connection
 // Config expects: host, port, user, pass, root, use_ssh_agent
@@ -83,6 +92,7 @@ func (d *SFTPDriver) Mount(mountID int, config map[string]string) error {
 	d.pass = pass
 	d.rootPath = rootPath
 	d.useSSHAgent = useAgent
+	d.stats = &api.MountStats{}
 
 	// Establish connection
 	if err := d.connect(); err != nil {
@@ -98,7 +108,7 @@ func (d *SFTPDriver) connect() error {
 		return fmt.Errorf("missing required sftp user")
 	}
 
-	addr := fmt.Sprintf("%s:%d", d.host, d.port)
+	addr := net.JoinHostPort(d.host, strconv.Itoa(d.port))
 
 	auths := []ssh.AuthMethod{}
 	if d.pass != "" {
@@ -126,10 +136,23 @@ func (d *SFTPDriver) connect() error {
 		Timeout:         5 * time.Second,
 	}
 
-	sshConn, err := ssh.Dial("tcp", addr, sshConfig)
+	// Dial TCP ourselves so we can wrap the conn with api.CountingConn
+	// before the SSH layer is built on top. ssh.Dial would do this in
+	// one step but hides the underlying conn — we need it for byte
+	// accounting. Once we have the SSH client, sftp.NewClient layers
+	// the SFTP subsystem on the same encrypted channel.
+	rawConn, err := net.DialTimeout("tcp", addr, sshConfig.Timeout)
 	if err != nil {
 		return fmt.Errorf("ssh dial failed: %w", err)
 	}
+	counted := api.WrapConn(rawConn, d.stats)
+
+	sshClientConn, chans, reqs, err := ssh.NewClientConn(counted, addr, sshConfig)
+	if err != nil {
+		counted.Close()
+		return fmt.Errorf("ssh dial failed: %w", err)
+	}
+	sshConn := ssh.NewClient(sshClientConn, chans, reqs)
 
 	sftpClient, err := sftp.NewClient(sshConn)
 	if err != nil {

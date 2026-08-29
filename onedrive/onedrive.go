@@ -44,18 +44,11 @@ func init() {
 }
 
 const (
+	graphBase    = "https://graph.microsoft.com/v1.0"
+	tokenURL     = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 	uploadMemCap = 4 * 1024 * 1024  // fits Graph's "small upload" ceiling
 	chunkSize    = 10 * 1024 * 1024 // multiple of 320 KiB, well under 60 MiB cap
 	maxRetries   = 3
-)
-
-// Service endpoints. Variables rather than constants so tests can point the
-// driver at a local server: every request this driver makes is built from
-// these two, and there is otherwise no way to exercise the request and
-// response handling without talking to Microsoft.
-var (
-	graphBase = "https://graph.microsoft.com/v1.0"
-	tokenURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 )
 
 type OneDriveDriver struct {
@@ -69,6 +62,9 @@ type OneDriveDriver struct {
 
 	httpClient *http.Client
 	connected  bool
+	// Per-mount transport counters fed by api.CountingTransport. The
+	// host-side IOStatsCollector polls a Snapshot() each tick.
+	stats *api.MountStats
 
 	// Endpoints, per driver rather than per package, so one mount can be
 	// pointed at a substitute without moving every other mount with it.
@@ -78,8 +74,13 @@ type OneDriveDriver struct {
 
 func (d *OneDriveDriver) Name() string { return "onedrive" }
 
-// base and tokenEndpoint return the endpoints this driver was mounted with, falling
-// back to the live service so a zero-value driver still builds sane URLs.
+// Stats implements api.StatsProvider so the MountManager can hand
+// our transport counters back through the C ABI.
+func (d *OneDriveDriver) Stats() *api.MountStats { return d.stats }
+
+// base and tokenEndpoint return the endpoints this driver was mounted with,
+// falling back to the live service so a zero-value driver still builds sane
+// URLs.
 func (d *OneDriveDriver) base() string {
 	if d.graphBase != "" {
 		return d.graphBase
@@ -109,7 +110,8 @@ func (d *OneDriveDriver) Mount(mountID int, config map[string]string) error {
 		return &api.DriverError{Code: 10, Message: "onedrive: client_id and refresh_token are required"}
 	}
 
-	d.httpClient = &http.Client{Timeout: 60 * time.Second}
+	d.stats = &api.MountStats{}
+	d.httpClient = api.WrapHTTPClient(&http.Client{Timeout: 60 * time.Second}, d.stats)
 
 	// api_base_url points every request at a substitute for the live service,
 	// which is what lets the driver be tested, or run against a mock, without
@@ -260,6 +262,114 @@ func (d *OneDriveDriver) Rename(mountID int, oldPath, newPath string) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// GetThumbnail implements api.Thumbnailer using the Graph
+// /thumbnails endpoint. Two-step flow:
+//
+//  1. GET /me/drive/root:/path:/thumbnails — returns one ThumbnailSet
+//     per item with `small`/`medium`/`large` URL fields. Each URL is a
+//     short-lived signed CDN link.
+//  2. GET the chosen size's URL with no Authorization header.
+//
+// We pick the standard bucket (small ~96, medium ~176, large ~800)
+// closest to but >= sizePx. Returns a clear error when the item has no
+// thumbnails (folder, freshly uploaded, or non-previewable type).
+func (d *OneDriveDriver) GetThumbnail(mountID int, path string, sizePx int) ([]byte, error) {
+	if !d.connected {
+		return nil, api.ErrNotConnected
+	}
+	p := normPath(path)
+	resp, err := d.do(context.Background(), "GET", d.itemURL(p, "/thumbnails"), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var page struct {
+		Value []map[string]thumbnailEntry `json:"value"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&page)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Value) == 0 {
+		return nil, &api.DriverError{Code: 5, Message: "onedrive: no thumbnail available for " + path}
+	}
+	bucket := thumbnailBucket(sizePx)
+	thumbURL, ok := pickThumbnailURL(page.Value[0], bucket)
+	if !ok || thumbURL == "" {
+		return nil, &api.DriverError{Code: 5, Message: "onedrive: no thumbnail bucket available for " + path}
+	}
+
+	// CDN URL is pre-signed; no Authorization header. Use the wrapped
+	// httpClient so bytes count toward per-mount stats.
+	req, err := http.NewRequestWithContext(context.Background(), "GET", thumbURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	tresp, err := d.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer tresp.Body.Close()
+	if tresp.StatusCode >= 400 {
+		b, _ := io.ReadAll(tresp.Body)
+		return nil, fmt.Errorf("onedrive: thumbnail HTTP %d: %s", tresp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return io.ReadAll(tresp.Body)
+}
+
+// thumbnailBucket maps a requested long-edge size to the standard
+// Graph thumbnail bucket name. Graph offers `small` (~96), `medium`
+// (~176), and `large` (~800) by default.
+func thumbnailBucket(sizePx int) string {
+	switch {
+	case sizePx <= 96:
+		return "small"
+	case sizePx <= 176:
+		return "medium"
+	default:
+		return "large"
+	}
+}
+
+// thumbnailEntry is one (size -> {url,width,height}) entry inside a
+// Graph ThumbnailSet. Hoisted to a named type so GetThumbnail and
+// pickThumbnailURL share the same shape without redeclaring it.
+type thumbnailEntry struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// pickThumbnailURL extracts the URL for the requested bucket from a
+// ThumbnailSet. If the requested bucket is missing it falls back to
+// other present buckets per fallbackOrder, mirroring how clients
+// typically handle partial sets.
+func pickThumbnailURL(set map[string]thumbnailEntry, bucket string) (string, bool) {
+	if e, ok := set[bucket]; ok && e.URL != "" {
+		return e.URL, true
+	}
+	for _, name := range fallbackOrder(bucket) {
+		if e, ok := set[name]; ok && e.URL != "" {
+			return e.URL, true
+		}
+	}
+	return "", false
+}
+
+// fallbackOrder returns the bucket-preference list to try when the
+// requested bucket is absent. Prefer larger buckets first (better to
+// downscale than upscale).
+func fallbackOrder(bucket string) []string {
+	switch bucket {
+	case "small":
+		return []string{"medium", "large"}
+	case "medium":
+		return []string{"large", "small"}
+	default: // large
+		return []string{"medium", "small"}
+	}
 }
 
 // --- driveItem ------------------------------------------------------------
@@ -596,6 +706,25 @@ func (d *OneDriveDriver) refresh(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
+		// `invalid_grant` (HTTP 4xx) means Microsoft has rejected the
+		// refresh token outright (revoked, expired through inactivity,
+		// password changed, conditional-access policy, …). The
+		// host-side supervisor watches for this prefix and kicks off
+		// the OAuth re-authorise flow so the user never has to dig
+		// into mount settings to fix it.
+		//
+		// Inspect the structured `error` field only — a substring
+		// match would false-positive when "invalid_grant" appears
+		// inside `error_description` of, say, an `invalid_client`
+		// response.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			var oerr struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(b, &oerr) == nil && oerr.Error == "invalid_grant" {
+				return fmt.Errorf("oauth_reauth_required: token refresh HTTP %d: %s", resp.StatusCode, string(b))
+			}
+		}
 		return fmt.Errorf("token refresh HTTP %d: %s", resp.StatusCode, string(b))
 	}
 	var result struct {
