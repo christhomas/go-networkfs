@@ -337,6 +337,7 @@ test-docker: servers-up
 		-e FTP_ADDR=ftp    -e FTP_PORT=21 \
 		-e SFTP_ADDR=sftp  -e SFTP_PORT=22 \
 		-e DAV_ADDR=webdav -e DAV_PORT=80 \
+		-e MOCK_ADDR=mockapi -e MOCK_PORT=8081 \
 		$(RUNNER_IMAGE) make ci-tests ; \
 		status=$$? ; $(MAKE) servers-down ; exit $$status
 
