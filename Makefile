@@ -125,7 +125,7 @@ define wait_for_port
 endef
 
 .PHONY: minio-up
-minio-up:
+minio-up: network-up
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias minio --name $(S3_CONTAINER) -p $(S3_PORT):9000 \
 		-e MINIO_ROOT_USER=$(S3_KEY) -e MINIO_ROOT_PASSWORD=$(S3_SECRET) \
@@ -137,7 +137,7 @@ minio-up:
 	@docker exec $(S3_CONTAINER) mkdir -p /data/$(S3_BUCKET)
 
 .PHONY: ftp-up
-ftp-up:
+ftp-up: network-up
 	@docker rm -f $(FTP_CONTAINER) >/dev/null 2>&1 || true
 	@# Passive mode hands the client a second port to connect back on, so the
 	@# range has to be published and the server has to advertise an address the
@@ -153,7 +153,7 @@ ftp-down:
 	@docker rm -f $(FTP_CONTAINER) >/dev/null 2>&1 || true
 
 .PHONY: sftp-up
-sftp-up:
+sftp-up: network-up
 	@docker rm -f $(SFTP_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias sftp --name $(SFTP_CONTAINER) -p $(SFTP_PORT):22 \
 		$(SFTP_IMAGE) $(SFTP_USER):$(SFTP_PASS):::upload
@@ -164,7 +164,7 @@ sftp-down:
 	@docker rm -f $(SFTP_CONTAINER) >/dev/null 2>&1 || true
 
 .PHONY: webdav-up
-webdav-up:
+webdav-up: network-up
 	@docker rm -f $(DAV_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias webdav --name $(DAV_CONTAINER) -p $(DAV_PORT):80 \
 		-e USERNAME=$(DAV_USER) -e PASSWORD=$(DAV_PASS) $(DAV_IMAGE)
@@ -179,7 +179,7 @@ webdav-down:
 # The stand-in for Dropbox, Google Drive and OneDrive. Built from source in
 # this repository rather than pulled, so it cannot drift from the drivers.
 .PHONY: mockapi-up
-mockapi-up:
+mockapi-up: network-up
 	docker build -t $(MOCK_IMAGE) -f .github/docker/mockapi/Dockerfile .
 	@docker rm -f $(MOCK_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias mockapi \
@@ -196,7 +196,7 @@ network-up:
 		docker network create $(TEST_NETWORK) >/dev/null
 
 .PHONY: servers-up
-servers-up: network-up samba-up minio-up ftp-up sftp-up webdav-up mockapi-up
+servers-up: samba-up minio-up ftp-up sftp-up webdav-up mockapi-up
 
 .PHONY: servers-down
 servers-down: samba-down minio-down ftp-down sftp-down webdav-down mockapi-down
@@ -207,7 +207,7 @@ minio-down:
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
 
 .PHONY: samba-up
-samba-up:
+samba-up: network-up
 	docker build -t $(SMB_IMAGE) .github/docker/samba
 	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias samba --name $(SMB_CONTAINER) -p $(SMB_PORT):445 $(SMB_IMAGE)

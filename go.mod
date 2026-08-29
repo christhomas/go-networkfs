@@ -19,7 +19,20 @@ require (
 )
 
 require (
-	github.com/antimatter-studios/go-smb2-hirochachacha v1.2.2
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/hashicorp/go-uuid v1.0.3 // indirect
+	github.com/huner2/go-sddlparse/v2 v2.0.2 // indirect
+	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
+	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
+	github.com/jcmturner/gofork v1.7.6 // indirect
+	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
+	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
+	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
+	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+)
+
+require (
+	github.com/antimatter-studios/go-smb2-hirochachacha/v2 v2.0.1
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
 	github.com/charmbracelet/x/ansi v0.10.1 // indirect

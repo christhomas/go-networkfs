@@ -8,6 +8,7 @@
 package smb
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -15,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antimatter-studios/go-smb2-hirochachacha"
+	smb2 "github.com/antimatter-studios/go-smb2-hirochachacha/v2"
 	"github.com/christhomas/go-networkfs/pkg/api"
 )
 
@@ -125,7 +126,11 @@ func (d *SMBDriver) connect() error {
 		},
 	}
 
-	session, err := dialer.Dial(conn)
+	// DialConn takes the server name separately from the connection: it
+	// becomes the host in the UNC paths this session builds, and some servers
+	// answer differently depending on the name they were addressed by. The
+	// port does not belong in one, so d.host goes in rather than addr.
+	session, err := dialer.DialConn(context.Background(), conn, d.host)
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("SMB dial failed: %w", err)
