@@ -452,94 +452,118 @@ func (m model) previewCmd(e api.FileInfo) tea.Cmd {
 	}
 }
 
+// clearPreview drops the current preview and returns the command needed to
+// erase what it left on screen, if anything.
+//
+// Only Kitty images need erasing. They are drawn outside the text grid, so
+// bubbletea's next render does not overwrite them and they would otherwise
+// hang beside whichever entry the cursor moved to. Text and iTerm2 previews
+// live in the grid and go on their own.
+func (m model) clearPreview() (model, tea.Cmd) {
+	hadImage := m.preview.kind == previewImage
+	m.preview = preview{}
+	if hadImage {
+		return m, cleanupImageCmd(m.imgTmux)
+	}
+	return m, nil
+}
+
 func (m model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case entriesMsg:
-		hadImage := m.preview.kind == previewImage
-		if msg.err != nil {
-			m.status = "list error: " + msg.err.Error()
-			m.entries = nil
-		} else {
-			m.entries = msg.entries
-			m.browseIdx = 0
-			m.status = fmt.Sprintf("%d entries", len(m.entries))
-		}
-		// Any navigation invalidates the preview.
-		m.preview = preview{}
-		if hadImage {
-			return m, cleanupImageCmd(m.imgTmux)
-		}
-		return m, nil
+		return m.onEntries(msg)
 	case previewMsg:
-		m.preview = msg.preview
-		switch m.preview.kind {
-		case previewError:
-			m.status = "preview error"
-		case previewText:
-			m.status = fmt.Sprintf("text preview · %s · %d bytes", m.preview.mime, m.preview.size)
-		case previewImage:
-			m.status = fmt.Sprintf("image preview · %s · %d bytes", m.preview.mime, m.preview.size)
-			if m.preview.image != "" {
-				// Build: save cursor → move to right-panel origin →
-				// delete any previous Kitty image → transmit + display
-				// the new one → restore cursor. Cursor moves are plain
-				// ANSI (tmux passes them through natively); only the
-				// Kitty-specific escapes need DCS wrapping, which
-				// buildPreview already applied.
-				row, col := m.rightPanelTopLeft()
-				seq := positionImage(m.preview.image, row, col, m.imgTmux)
-				return m, emitImageCmd(seq)
-			}
-		case previewBinary:
-			m.status = fmt.Sprintf("no preview · %s · %d bytes", m.preview.mime, m.preview.size)
-		}
-		return m, nil
+		return m.onPreview(msg)
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q":
-			if m.driver != nil {
-				_ = m.driver.Unmount(m.mountID)
-			}
-			return m, tea.Quit
-		case "up", "k":
-			if m.browseIdx > 0 {
-				m.browseIdx--
-				hadImage := m.preview.kind == previewImage
-				m.preview = preview{}
-				if hadImage {
-					return m, cleanupImageCmd(m.imgTmux)
-				}
-			}
-		case "down", "j":
-			if m.browseIdx < len(m.entries)-1 {
-				m.browseIdx++
-				hadImage := m.preview.kind == previewImage
-				m.preview = preview{}
-				if hadImage {
-					return m, cleanupImageCmd(m.imgTmux)
-				}
-			}
-		case "enter":
-			if len(m.entries) == 0 {
-				return m, nil
-			}
-			e := m.entries[m.browseIdx]
-			if !e.IsDir {
-				m.status = "loading preview: " + e.Name
-				return m, m.previewCmd(e)
-			}
-			m.cwd = joinPath(m.cwd, e.Name)
-			return m, m.refreshCmd()
-		case "backspace", "h", "left":
-			if m.cwd == "/" || m.cwd == "" {
-				return m, nil
-			}
-			m.cwd = parentPath(m.cwd)
-			return m, m.refreshCmd()
-		case "r":
-			return m, m.refreshCmd()
+		return m.onBrowserKey(msg)
+	}
+	return m, nil
+}
+
+// onEntries takes the result of a listing. Arriving at a new directory
+// invalidates whatever was being previewed.
+func (m model) onEntries(msg entriesMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.status = "list error: " + msg.err.Error()
+		m.entries = nil
+	} else {
+		m.entries = msg.entries
+		m.browseIdx = 0
+		m.status = fmt.Sprintf("%d entries", len(m.entries))
+	}
+	return m.clearPreview()
+}
+
+// onPreview takes a built preview and reports what it is. An image also has
+// to be drawn, which the status line cannot do.
+func (m model) onPreview(msg previewMsg) (tea.Model, tea.Cmd) {
+	m.preview = msg.preview
+
+	switch m.preview.kind {
+	case previewError:
+		m.status = "preview error"
+	case previewText:
+		m.status = fmt.Sprintf("text preview · %s · %d bytes", m.preview.mime, m.preview.size)
+	case previewBinary:
+		m.status = fmt.Sprintf("no preview · %s · %d bytes", m.preview.mime, m.preview.size)
+	case previewImage:
+		m.status = fmt.Sprintf("image preview · %s · %d bytes", m.preview.mime, m.preview.size)
+		if m.preview.image != "" {
+			// Save cursor, move to the right panel's origin, delete any
+			// previous Kitty image, transmit and display the new one, restore
+			// the cursor. The cursor moves are plain ANSI, which tmux passes
+			// through natively; only the Kitty escapes need the DCS wrapping
+			// buildPreview has already applied.
+			row, col := m.rightPanelTopLeft()
+			return m, emitImageCmd(positionImage(m.preview.image, row, col, m.imgTmux))
 		}
 	}
+	return m, nil
+}
+
+func (m model) onBrowserKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		if m.driver != nil {
+			_ = m.driver.Unmount(m.mountID)
+		}
+		return m, tea.Quit
+
+	case "up", "k":
+		if m.browseIdx > 0 {
+			m.browseIdx--
+			return m.clearPreview()
+		}
+
+	case "down", "j":
+		if m.browseIdx < len(m.entries)-1 {
+			m.browseIdx++
+			return m.clearPreview()
+		}
+
+	case "enter":
+		if len(m.entries) == 0 {
+			return m, nil
+		}
+		e := m.entries[m.browseIdx]
+		if !e.IsDir {
+			m.status = "loading preview: " + e.Name
+			return m, m.previewCmd(e)
+		}
+		m.cwd = joinPath(m.cwd, e.Name)
+		return m, m.refreshCmd()
+
+	case "backspace", "h", "left":
+		if m.cwd == "/" || m.cwd == "" {
+			return m, nil
+		}
+		m.cwd = parentPath(m.cwd)
+		return m, m.refreshCmd()
+
+	case "r":
+		return m, m.refreshCmd()
+	}
+
 	return m, nil
 }
 

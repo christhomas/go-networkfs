@@ -371,14 +371,3 @@ func (d *SFTPDriver) Rename(mountID int, oldPath, newPath string) error {
 		return d.client.Rename(absOldPath, absNewPath)
 	})
 }
-
-// Helper to extract filename from path
-func (d *SFTPDriver) nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return path
-}
