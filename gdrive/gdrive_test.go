@@ -122,33 +122,6 @@ func TestSplitParent(t *testing.T) {
 // nameFromPath
 // ---------------------------------------------------------------------------
 
-func TestNameFromPath(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"empty", "", ""},
-		{"root_only", "/", ""},
-		{"only_slashes", "///", ""},
-		{"single_rooted", "/foo", "foo"},
-		{"two_segments", "/a/b", "b"},
-		{"trailing_slash_ignored", "/a/b/", "b"},
-		{"multiple_trailing_slashes_ignored", "/a/b///", "b"},
-		{"unrooted_single", "foo", "foo"},
-		{"unicode", "/a/éléphant", "éléphant"},
-		{"space_name", "/a/My File.txt", "My File.txt"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := nameFromPath(tc.in)
-			if got != tc.want {
-				t.Fatalf("nameFromPath(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // strOrDefault
 // ---------------------------------------------------------------------------

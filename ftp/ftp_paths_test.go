@@ -26,19 +26,6 @@ func (e statusError) Code() int       { return e.code }
 func (e statusError) Temporary() bool { return false }
 func (e statusError) Message() string { return e.msg }
 
-func TestNameFromPath(t *testing.T) {
-	d := &FTPDriver{}
-	for _, tt := range []struct{ in, want string }{
-		{"/a/b/c.txt", "c.txt"},
-		{"/a/b/", "b"},
-		{"/single", "single"},
-	} {
-		if got := d.nameFromPath(tt.in); got != tt.want {
-			t.Errorf("nameFromPath(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
 // A 550 is "no such file", and it arrives either as a typed textproto error or
 // buried in a message, depending on where in the library it surfaced. Both
 // have to map to the same explanation.

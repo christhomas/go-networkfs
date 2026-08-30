@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
+	"github.com/christhomas/go-networkfs/pkg/fsutil"
 	"github.com/studio-b12/gowebdav"
 )
 
@@ -164,17 +165,6 @@ func (d *WebDAVDriver) fullPath(requested string) string {
 	return cleanPath + req
 }
 
-// nameFromPath extracts the last non-empty segment of a path.
-func (d *WebDAVDriver) nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return path
-}
-
 // Stat retrieves file/directory metadata.
 func (d *WebDAVDriver) Stat(mountID int, path string) (info api.FileInfo, err error) {
 	defer func() {
@@ -196,7 +186,7 @@ func (d *WebDAVDriver) Stat(mountID int, path string) (info api.FileInfo, err er
 
 	name := fi.Name()
 	if name == "" {
-		name = d.nameFromPath(path)
+		name = fsutil.NameFromPath(path)
 	}
 
 	return api.FileInfo{

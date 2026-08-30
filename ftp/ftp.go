@@ -307,7 +307,10 @@ func (d *FTPDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	}
 
 	if path == "" || path == "/" {
-		return api.FileInfo{Name: "/", Path: "/", IsDir: true}, nil
+		// The root has no name. S3 and Google Drive already answer this way
+		// from their own root branches, and a caller of api.Driver should not
+		// have to know which backend replied.
+		return api.FileInfo{Name: "", Path: "/", IsDir: true}, nil
 	}
 
 	var info api.FileInfo
@@ -530,15 +533,4 @@ func (d *FTPDriver) Rename(mountID int, oldPath, newPath string) error {
 	return d.withReconnect(func() error {
 		return d.client.Rename(absOldPath, absNewPath)
 	})
-}
-
-// Helper to extract filename from path
-func (d *FTPDriver) nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return path
 }

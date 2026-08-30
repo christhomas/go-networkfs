@@ -71,32 +71,6 @@ func TestNormPath(t *testing.T) {
 }
 
 // nameFromPath returns the right-most non-empty path segment.
-func TestNameFromPath(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"", ""},
-		{"/", ""},
-		{"//", ""},
-		{"///", ""},
-		{"/foo", "foo"},
-		{"/foo/", "foo"},
-		{"/foo/bar", "bar"},
-		{"/foo/bar/", "bar"},
-		{"/foo/bar//", "bar"},
-		{"foo", "foo"},
-		{"foo/bar", "bar"},
-		{"/a/b/c.txt", "c.txt"},
-		{"/日本語/café.txt", "café.txt"},
-		{"/ space ", " space "}, // surrounding spaces preserved; only "/" separates segments
-	}
-	for _, c := range cases {
-		if got := nameFromPath(c.in); got != c.want {
-			t.Errorf("nameFromPath(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 // toKey: strips the single leading "/" from its argument and prepends
 // d.prefix. When d.prefix is "" the result is just the path without
 // leading slash; when d.prefix is non-empty it's assumed to already

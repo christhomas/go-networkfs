@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
+	"github.com/christhomas/go-networkfs/pkg/fsutil"
 )
 
 // Driver type ID - must match dispatcher registry
@@ -166,7 +167,7 @@ func (d *GDriveDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	}
 
 	info := api.FileInfo{
-		Name: strOrDefault(meta["name"], nameFromPath(p)),
+		Name: strOrDefault(meta["name"], fsutil.NameFromPath(p)),
 		Path: p,
 	}
 	if mt, _ := meta["mimeType"].(string); mt == folderMime {
@@ -927,16 +928,6 @@ func splitParent(path string) (parent, name string) {
 		return "/", p[1:]
 	}
 	return p[:idx], p[idx+1:]
-}
-
-func nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return ""
 }
 
 func strOrDefault(v interface{}, def string) string {

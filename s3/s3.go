@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
+	"github.com/christhomas/go-networkfs/pkg/fsutil"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -155,7 +156,7 @@ func (d *S3Driver) Stat(mountID int, path string) (api.FileInfo, error) {
 	// File?
 	if info, err := d.client.StatObject(context.Background(), d.bucket, key, minio.StatObjectOptions{}); err == nil {
 		return api.FileInfo{
-			Name:    nameFromPath(p),
+			Name:    fsutil.NameFromPath(p),
 			Path:    p,
 			Size:    info.Size,
 			IsDir:   false,
@@ -180,7 +181,7 @@ func (d *S3Driver) Stat(mountID int, path string) (api.FileInfo, error) {
 			return api.FileInfo{}, obj.Err
 		}
 		return api.FileInfo{
-			Name:  nameFromPath(p),
+			Name:  fsutil.NameFromPath(p),
 			Path:  p,
 			IsDir: true,
 		}, nil
@@ -461,14 +462,4 @@ func normPath(path string) string {
 		path = "/" + path
 	}
 	return strings.TrimRight(path, "/")
-}
-
-func nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return ""
 }

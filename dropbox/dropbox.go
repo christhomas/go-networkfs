@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/christhomas/go-networkfs/pkg/api"
+	"github.com/christhomas/go-networkfs/pkg/fsutil"
 	dbx "github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
 	"golang.org/x/oauth2"
@@ -212,17 +213,6 @@ func isInvalidGrant(err error) bool {
 	return invalidGrantField.MatchString(err.Error())
 }
 
-// nameFromPath extracts the trailing component of a path.
-func nameFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" {
-			return parts[i]
-		}
-	}
-	return ""
-}
-
 // Stat retrieves file/directory info
 func (d *DropboxDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 	if !d.connected || d.client == nil {
@@ -265,7 +255,7 @@ func (d *DropboxDriver) Stat(mountID int, path string) (api.FileInfo, error) {
 		}, nil
 	default:
 		return api.FileInfo{
-			Name:  nameFromPath(path),
+			Name:  fsutil.NameFromPath(path),
 			Path:  path,
 			IsDir: false,
 		}, nil

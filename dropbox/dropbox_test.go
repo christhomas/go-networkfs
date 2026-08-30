@@ -164,25 +164,6 @@ func TestDbxPath(t *testing.T) {
 }
 
 // nameFromPath returns the trailing non-empty component.
-func TestNameFromPath(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"", ""},
-		{"/", ""},
-		{"/foo", "foo"},
-		{"/foo/bar", "bar"},
-		{"/foo/bar/", "bar"}, // trailing slash ignored
-		{"foo", "foo"},
-		{"/a/b/c.txt", "c.txt"},
-	}
-	for _, c := range cases {
-		if got := nameFromPath(c.in); got != c.want {
-			t.Errorf("nameFromPath(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 // wrapDbxError special-cases missing_scope errors with a friendlier
 // hint; everything else passes through untouched.
 func TestWrapDbxError(t *testing.T) {
