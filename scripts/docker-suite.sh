@@ -47,7 +47,7 @@ fi
 docker run --rm --network "$TEST_NETWORK" \
     -v "$REPO":/src -v go-networkfs-gomod:/go/pkg/mod \
     -e SMB_ADDR=samba    -e SMB_PORT=445 \
-    -e S3_ADDR=minio     -e S3_PORT=9000 \
+    -e S3_ADDR=sss3      -e S3_PORT=5553 \
     -e FTP_ADDR=ftp      -e FTP_PORT=21 \
     -e SFTP_ADDR=sftp    -e SFTP_PORT=22 \
     -e DAV_ADDR=webdav   -e DAV_PORT=80 \

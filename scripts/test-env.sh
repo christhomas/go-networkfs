@@ -40,14 +40,28 @@ SMB_SHARE="${SMB_SHARE:-tmp}"
 SMB_USER="${SMB_USER:-smbuser}"
 SMB_PASS="${SMB_PASS:-Smbpasswd12345}"
 
-# MinIO speaks the S3 protocol, so the S3 driver is tested against the real
-# thing rather than a hand-written stub of it.
+# stupid-simple-s3 speaks the S3 protocol, so the S3 driver is tested against
+# the real thing rather than a hand-written stub of it. It ships both as an
+# image and as a single static binary, so unlike Samba it does not need a
+# container: `chore test:s3` runs the binary (scripts/sss3-server.sh) and needs
+# no Docker at all. The container is for `chore servers:up` and `chore test`,
+# where every server has to sit on one network for the runner to reach by name.
+#
+# S3_PORT is the PUBLISHED port on the host; the server listens on 5553 inside
+# the container, which is what the runner reaches it on.
 S3_PORT="${S3_PORT:-9000}"
-S3_IMAGE="${S3_IMAGE:-minio/minio:latest}"
-S3_CONTAINER="${S3_CONTAINER:-go-networkfs-minio}"
+S3_VERSION="${S3_VERSION:-1.0.7}"
+S3_IMAGE="${S3_IMAGE:-ghcr.io/espebra/stupid-simple-s3:$S3_VERSION}"
+S3_CONTAINER="${S3_CONTAINER:-go-networkfs-sss3}"
 S3_BUCKET="${S3_BUCKET:-testbucket}"
-S3_KEY="${S3_KEY:-minioadmin}"
-S3_SECRET="${S3_SECRET:-minioadmin}"
+S3_KEY="${S3_KEY:-sss3admin}"
+S3_SECRET="${S3_SECRET:-sss3admin123}"
+# The image is distroless and runs as `nonroot`, which owns exactly one
+# directory: the one its own Dockerfile prepares and chowns. Pointing the
+# server anywhere else — /data, say — leaves it unable to create the storage
+# directory, and it exits 1 on the spot.
+S3_DATA="${S3_DATA:-/var/lib/stupid-simple-s3/data}"
+S3_TMP="${S3_TMP:-/var/lib/stupid-simple-s3/tmp}"
 
 FTP_PORT="${FTP_PORT:-2121}"
 FTP_PASV_LO="${FTP_PASV_LO:-40000}"

@@ -169,8 +169,8 @@ Two ways in, same server and same version:
 
 | | How | Needs Docker |
 |---|---|---|
-| `make test-s3` | [`scripts/sss3-server.sh`](../scripts/sss3-server.sh) fetches the release binary for the host platform, checks it against the published SHA-256, runs it from `build/sss3` | no |
-| `make servers-up` / `make test-docker` | `ghcr.io/espebra/stupid-simple-s3:1.0.7` on the shared test network | yes |
+| `chore test:s3` (`chore servers:up -- s3-native`) | [`scripts/sss3-server.sh`](../scripts/sss3-server.sh) fetches the release binary for the host platform, checks it against the published SHA-256, runs it from `build/sss3` | no |
+| `chore servers:up` / `chore test` | `ghcr.io/espebra/stupid-simple-s3:1.0.7` on the shared test network | yes |
 
 The native path is the default for the S3 driver alone, because sss3 is a
 single static binary and the other servers are not. It is what makes the S3

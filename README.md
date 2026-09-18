@@ -181,8 +181,8 @@ Mocked vs. real:
   end-to-end (`dropbox_integration` build tag) — both require real
   credentials and are skipped in CI.
 - **Real server, no credentials:** S3 (`s3_integration` build tag)
-  against stupid-simple-s3 — `make test-s3` brings one up and takes it
-  down, Docker or not.
+  against stupid-simple-s3 — `chore test:s3` brings one up and takes it
+  down, and needs no Docker to do it.
 - **Docker harness:** `test-server/docker-compose.yml` brings up
   vsftpd / openssh-sftp / apache-webdav / samba on local ports; four
   matching `.env.yaml` presets feed the TUI directly.
@@ -278,9 +278,10 @@ chore --list
 | `chore test` | **Everything CI runs**: six server containers, every driver's tagged integration tests and the C ABI harnesses, all inside containers. Needs Docker and nothing else — no Go toolchain, no C compiler. |
 | `chore test:integration` | The same full run on this host's toolchain, without the runner container — the edit-run loop. |
 | `chore test:ci` | The suite against servers that are ALREADY up; what runs inside the runner container. |
-| `chore test:smb`, `chore test:s3` | One driver against one throwaway server. |
+| `chore test:smb` | The SMB driver against a throwaway Samba container. |
+| `chore test:s3` | The S3 driver against a throwaway [stupid-simple-s3][sss3] — the pinned binary, so **no Docker**. |
 | `chore test:cabi` | The C ABI harnesses (C programs linking the shipped archives) against real servers. |
-| `chore servers:up`, `servers:down`, `servers:status`, `servers:env` | The test servers by hand: `chore servers:up -- samba` for one, no arguments for all six. |
+| `chore servers:up`, `servers:down`, `servers:status`, `servers:env` | The test servers by hand: `chore servers:up -- samba` for one, no arguments for all six, `-- s3-native` for the daemonless S3 server. |
 | `chore lint`, `chore vet`, `chore vulncheck` | The gates, exactly as CI runs them. |
 | `chore tools` | Install the pinned golangci-lint and govulncheck into `tmp/bin`. |
 | `chore tidy`, `chore deps`, `chore deps:verify` | Module housekeeping. |
@@ -445,7 +446,7 @@ self-hosted in a way that matches their real API surface). Their
 end-to-end integration tests live behind `//go:build <name>_integration`
 tags and require real credentials.
 
-S3 is self-hostable and so is not in that list: `make test-s3` runs the
+S3 is self-hostable and so is not in that list: `chore test:s3` runs the
 tests against a real [stupid-simple-s3][sss3] with no Docker and no
 credentials. What it does not cover is noted in
 [docs/DRIVERS.md](docs/DRIVERS.md#s3-test-server).

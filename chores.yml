@@ -38,6 +38,12 @@ chore_min_version: 0.6.0
 #   Google Drive and OneDrive cannot be run locally at all (test/mockapi stands
 #   in for those three, built from this repository so it cannot drift).
 #
+#   ONE OF THE SIX NEEDS NO DAEMON. stupid-simple-s3 ships as a static binary
+#   as well as an image, so `chore test:s3` runs the pinned, checksummed binary
+#   (`s3-native`) and works on a machine with no Docker at all. `chore test`
+#   uses the container, because there every server sits on one network and the
+#   runner reaches it by name.
+#
 #   Nothing is installed on the machine: it is Docker or it is nothing.
 #   `chore test` goes further and runs the suite INSIDE a container too, so a
 #   contributor needs Docker and nothing else — not even a Go toolchain — and
@@ -235,9 +241,17 @@ tasks:
       - 'scripts/with-servers.sh samba -- scripts/tier.sh test:smb smb 20 2000 -- go test -race -count=1 -tags=smb_integration -run Integration ./smb/...'
 
   test:s3:
-    desc: S3 driver integration tests against a throwaway S3 server
+    desc: "S3 driver integration tests against a throwaway stupid-simple-s3 — no Docker needed"
+    # `s3-native`, not `s3`: stupid-simple-s3 ships as a single static binary as
+    # well as an image, so this one driver's integration tests need no daemon at
+    # all. scripts/sss3-server.sh fetches the pinned build for the host, checks
+    # it against the published SHA-256 and runs it from build/sss3.
+    #
+    # `chore test` still uses the container, because there every server has to
+    # sit on one Docker network for the runner to reach it by name. Same server,
+    # same pinned version, both ways.
     cmds:
-      - 'scripts/with-servers.sh s3 -- scripts/tier.sh test:s3 s3 20 2000 -- go test -race -count=1 -tags=s3_integration -run Integration ./s3/...'
+      - 'scripts/with-servers.sh s3-native -- scripts/tier.sh test:s3 s3 20 2000 -- go test -race -count=1 -tags=s3_integration -run Integration ./s3/...'
 
   test:cabi:
     desc: "The C ABI, exercised from C against real servers — the only caller that can reach three of its entry points"
@@ -303,14 +317,17 @@ tasks:
   # ------------------------------------------------------------------- servers
 
   servers:up:
-    desc: "Start the test servers (samba s3 ftp sftp webdav mockapi; default: all) and wait until each answers"
+    desc: "Start the test servers (samba s3 ftp sftp webdav mockapi, or s3-native; default: all six) and wait until each answers"
     # HERE SO A DEVELOPER CAN BRING THEM UP WITHOUT READING A MAKEFILE. It used
     # to take `make samba-up` — and knowing that `make test-smb` would take it
     # down again underneath you. Bring them up, run tests against them for an
     # afternoon, `chore servers:down` when done.
     #
-    #   chore servers:up            every server
-    #   chore servers:up -- samba   just that one
+    #   chore servers:up                 every container
+    #   chore servers:up -- samba        just that one
+    #   chore servers:up -- s3-native    the S3 server as a plain binary, no
+    #                                    Docker anywhere — what `chore test:s3`
+    #                                    uses
     cmds: ['scripts/servers.sh up {{.CLI_ARGS}}']
 
   servers:down:

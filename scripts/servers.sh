@@ -8,7 +8,17 @@
 #   servers.sh status           what is running
 #   servers.sh env              the environment a suite needs to reach them
 #
-#   NAME is one of: samba s3 ftp sftp webdav mockapi
+#   NAME is one of: samba s3 ftp sftp webdav mockapi — or s3-native, the S3
+#   server run as a plain binary with no Docker at all (see below).
+#
+# ONE SERVER HAS TWO SHAPES. stupid-simple-s3 ships as a single static binary
+# as well as an image, so the S3 tests can run with no daemon: `s3-native`
+# fetches the pinned binary (scripts/sss3-server.sh) and runs it, and that is
+# what `chore test:s3` uses. `s3` is the same server as a container, which is
+# what `chore test` needs — there every server sits on one network and the
+# runner reaches it by name. Same version, pinned both ways. It is a separate
+# NAME rather than a hidden environment switch so that `chore servers:up --
+# s3-native` is a thing a developer can ask for and read back.
 #
 # WHY EVERY DRIVER THAT CAN HAVE A SERVER GETS ONE. Without a server a driver's
 # integration tests are skipped and its C harness only ever reaches the failure
@@ -30,7 +40,10 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
+# `all` means these six: the containers, on one network, which is what the
+# runner container needs. s3-native is not in it — it is the same server twice.
 ALL_SERVERS="samba s3 ftp sftp webdav mockapi"
+KNOWN_SERVERS="$ALL_SERVERS s3-native"
 
 # Every address, port, credential and image: scripts/test-env.sh, which the
 # suite and the C harness read too, so a port cannot be 4445 here and 445
@@ -44,9 +57,20 @@ die() { echo "servers.sh: $*" >&2; exit 1; }
 
 need_docker() {
     command -v docker >/dev/null 2>&1 \
-        || die "docker is not installed — the test servers are containers, there is no host fallback."
+        || die "docker is not installed — these test servers are containers. 'chore test:s3' (s3-native) is the one that runs without it."
     docker info >/dev/null 2>&1 \
         || die "docker is installed but not running."
+}
+
+# Only if something asked for actually is a container. Asking for s3-native
+# alone must work on a machine with no Docker at all — that is the whole point
+# of it.
+wants_docker() {
+    local name
+    for name in "$@"; do
+        [ "$name" = "s3-native" ] || return 0
+    done
+    return 1
 }
 
 # Built quietly. -q prints the image id and nothing else; --verbose builds the
@@ -75,6 +99,24 @@ wait_for_port() {   # $1 = container, $2 = published port
     return 1
 }
 
+# Wait for a container to answer on HTTP, or dump its logs and fail.
+#
+# wait_for_port is not enough on its own: `docker run -p` starts a proxy on the
+# host that accepts connections whether or not anything inside the container is
+# still alive, so a server that exited on startup still passes it. sss3 exiting
+# 1 on an unwritable storage path looked ready and surfaced ninety seconds
+# later as the C harness failing to mount.
+wait_for_health() {   # $1 = container, $2 = published port
+    local container="$1" port="$2"
+    for _ in $(seq 1 40); do
+        if curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" 2>/dev/null; then return 0; fi
+        sleep 1
+    done
+    echo "servers.sh: $container did not answer /healthz on port $port within 40s" >&2
+    docker logs "$container" >&2 || true
+    return 1
+}
+
 rm_container() { docker rm -f "$1" >/dev/null 2>&1 || true; }
 
 network_up() {
@@ -91,19 +133,31 @@ up_samba() {
     echo "  samba    127.0.0.1:$SMB_PORT (share tmp, user smbuser)"
 }
 
+# sss3 listens on 5553 and creates STUPID_BUCKET_NAME at startup, so the bucket
+# exists before anything connects. The Go tests make their own bucket through
+# the API; the C harness has no way to, which is what the pre-creation is for.
 up_s3() {
     rm_container "$S3_CONTAINER"
-    docker run -d --network "$TEST_NETWORK" --network-alias minio \
-        --name "$S3_CONTAINER" -p "$S3_PORT:9000" \
-        -e MINIO_ROOT_USER="$S3_KEY" -e MINIO_ROOT_PASSWORD="$S3_SECRET" \
-        "$S3_IMAGE" server /data >/dev/null
+    docker run -d --network "$TEST_NETWORK" --network-alias sss3 \
+        --name "$S3_CONTAINER" -p "$S3_PORT:5553" \
+        -e STUPID_PORT=5553 \
+        -e STUPID_STORAGE_PATH="$S3_DATA" -e STUPID_MULTIPART_PATH="$S3_TMP" \
+        -e STUPID_RW_ACCESS_KEY="$S3_KEY" -e STUPID_RW_SECRET_KEY="$S3_SECRET" \
+        -e STUPID_BUCKET_NAME="$S3_BUCKET" -e STUPID_LOG_LEVEL=warn \
+        "$S3_IMAGE" >/dev/null
     wait_for_port "$S3_CONTAINER" "$S3_PORT"
-    # MinIO's filesystem backend stores a bucket as a directory, so this is
-    # enough to create one without pulling in the mc client. The Go tests make
-    # their own bucket through the API; the C harness has no way to.
-    docker exec "$S3_CONTAINER" mkdir -p "/data/$S3_BUCKET"
-    echo "  s3       127.0.0.1:$S3_PORT (bucket $S3_BUCKET)"
+    wait_for_health "$S3_CONTAINER" "$S3_PORT"
+    echo "  s3       127.0.0.1:$S3_PORT (sss3 $S3_VERSION, bucket $S3_BUCKET)"
 }
+
+# The same server, no Docker: the pinned release binary, checksummed before it
+# is executed, run from build/sss3.
+up_s3_native() {
+    S3_PORT="$S3_PORT" S3_BUCKET="$S3_BUCKET" S3_KEY="$S3_KEY" S3_SECRET="$S3_SECRET" \
+        SSS3_VERSION="$S3_VERSION" scripts/sss3-server.sh up
+}
+
+down_s3_native() { scripts/sss3-server.sh down; }
 
 up_ftp() {
     rm_container "$FTP_CONTAINER"
@@ -162,7 +216,7 @@ container_of() {
         sftp)    echo "$SFTP_CONTAINER" ;;
         webdav)  echo "$DAV_CONTAINER" ;;
         mockapi) echo "$MOCK_CONTAINER" ;;
-        *)       die "unknown server '$1' (known: $ALL_SERVERS)" ;;
+        *)       die "unknown server '$1' (known: $KNOWN_SERVERS)" ;;
     esac
 }
 
@@ -170,8 +224,8 @@ check_names() {
     local name known
     for name in "$@"; do
         known=0
-        for k in $ALL_SERVERS; do [ "$name" = "$k" ] && known=1; done
-        [ "$known" = 1 ] || die "unknown server '$name' (known: $ALL_SERVERS)"
+        for k in $KNOWN_SERVERS; do [ "$name" = "$k" ] && known=1; done
+        [ "$known" = 1 ] || die "unknown server '$name' (known: $KNOWN_SERVERS)"
     done
 }
 
@@ -180,23 +234,35 @@ cmd="${1:-}"
 
 case "$cmd" in
     up)
-        need_docker
         names="${*:-$ALL_SERVERS}"
         # shellcheck disable=SC2086  # the words are the point
         check_names $names
-        network_up
-        for name in $names; do "up_$name"; done
+        # shellcheck disable=SC2086
+        if wants_docker $names; then need_docker; network_up; fi
+        for name in $names; do "up_${name//-/_}"; done
         ;;
 
     down)
+        # The default is everything, the native S3 server included: a developer
+        # who ran `chore servers:up -- s3-native` expects `chore servers:down`
+        # to mean what it says.
+        names="${*:-$ALL_SERVERS s3-native}"
+        # shellcheck disable=SC2086
+        check_names $names
+
+        # Native first, and before the docker check: stopping a plain process
+        # must work on a machine that has no daemon at all.
+        for name in $names; do
+            case "$name" in s3-native) down_s3_native ;; esac
+        done
+
         # NOT need_docker: `down` is what a trap runs when something went
         # wrong, and a teardown that fails because Docker went away would
         # replace the real error with its own.
         command -v docker >/dev/null 2>&1 || exit 0
-        names="${*:-$ALL_SERVERS}"
-        # shellcheck disable=SC2086
-        check_names $names
-        for name in $names; do "down_$name"; done
+        for name in $names; do
+            case "$name" in s3-native) ;; *) "down_${name//-/_}" ;; esac
+        done
         # The network belongs to the whole set, so it only goes when they all do.
         if [ $# -eq 0 ]; then
             docker network rm "$TEST_NETWORK" >/dev/null 2>&1 || true
@@ -204,6 +270,13 @@ case "$cmd" in
         ;;
 
     status)
+        # s3-native first, because it is the one that needs no daemon: asking
+        # what is running must not fail on a machine without Docker.
+        if scripts/sss3-server.sh status >/dev/null 2>&1; then
+            printf '  %-8s %-10s %s\n' "s3-native" "running" "build/sss3"
+        else
+            printf '  %-8s %-10s %s\n' "s3-native" "-" "build/sss3"
+        fi
         need_docker
         for name in $ALL_SERVERS; do
             c="$(container_of "$name")"
