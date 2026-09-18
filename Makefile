@@ -53,6 +53,12 @@ S3_CONTAINER  ?= go-networkfs-sss3
 S3_BUCKET     ?= testbucket
 S3_KEY        ?= sss3admin
 S3_SECRET     ?= sss3admin123
+# The image is distroless and runs as `nonroot`, which owns exactly one
+# directory: the one its own Dockerfile prepares and chowns. Pointing the
+# server anywhere else — /data, say — leaves it unable to create the storage
+# directory, and it exits 1 on the spot.
+S3_DATA       ?= /var/lib/stupid-simple-s3/data
+S3_TMP        ?= /var/lib/stupid-simple-s3/tmp
 
 # The remaining servers. Each driver that can be given one gets one, so its
 # C harness can mount and reach the success paths rather than only the
@@ -129,6 +135,22 @@ define wait_for_port
 	echo " timed out"; docker logs $(1); exit 1
 endef
 
+# Wait for a container to answer on HTTP, or dump its logs and fail.
+#
+# wait_for_port is not enough on its own: `docker run -p` starts a proxy on the
+# host that accepts connections whether or not anything inside the container is
+# still alive, so a server that exited on startup still passes it. That cost an
+# afternoon — sss3 exiting 1 on an unwritable storage path looked ready, and
+# surfaced ninety seconds later as the C harness failing to mount.
+define wait_for_health
+	@printf 'waiting for $(1) to answer /healthz'
+	@for i in $$(seq 1 40); do \
+		if curl -fsS -o /dev/null http://127.0.0.1:$(2)/healthz 2>/dev/null; then echo " ready"; exit 0; fi; \
+		printf '.'; sleep 1; \
+	done; \
+	echo " timed out"; docker logs $(1); exit 1
+endef
+
 # sss3 listens on 5553 and creates STUPID_BUCKET_NAME at startup, so the
 # bucket exists before anything connects. The Go tests make their own bucket
 # through the API; the C harness has no way to, which is what the pre-creation
@@ -138,11 +160,12 @@ sss3-up: network-up
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --network $(TEST_NETWORK) --network-alias sss3 --name $(S3_CONTAINER) -p $(S3_PORT):5553 \
 		-e STUPID_PORT=5553 \
-		-e STUPID_STORAGE_PATH=/data -e STUPID_MULTIPART_PATH=/tmp/multipart \
+		-e STUPID_STORAGE_PATH=$(S3_DATA) -e STUPID_MULTIPART_PATH=$(S3_TMP) \
 		-e STUPID_RW_ACCESS_KEY=$(S3_KEY) -e STUPID_RW_SECRET_KEY=$(S3_SECRET) \
 		-e STUPID_BUCKET_NAME=$(S3_BUCKET) -e STUPID_LOG_LEVEL=warn \
 		$(S3_IMAGE)
 	$(call wait_for_port,$(S3_CONTAINER),$(S3_PORT))
+	$(call wait_for_health,$(S3_CONTAINER),$(S3_PORT))
 
 # The same server, no Docker. Fetches the pinned release binary for the host
 # platform, checks it against the published SHA-256, and runs it from build/.
