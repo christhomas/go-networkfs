@@ -219,16 +219,28 @@ Commit the generated files so downstream builds don't need the
 generator, but fail CI if the generated output is stale (`go generate
 ./... && git diff --exit-code`).
 
-### 20. Makefile / Taskfile · S
-Common invocations are verbose. A tiny `Makefile` with targets:
+### 20. One entry point · DONE
+Done, and then done again. A `Makefile` landed first and grew to 406
+lines and 35 targets, owning the server containers and every real test
+entry point while `chores.yml` and the CI workflow each did some of the
+same work differently — three ways to run the tests and no single
+definition of a full run (issue #8). The Makefile is gone; `chore` is
+the only entry point, its logic lives in `scripts/`, and every CI job
+runs one of its tasks:
 
 ```
-make test           # go test ./... -race -cover
-make bench          # go test -bench=. ./ftp
-make archives       # all five .a files
-make tui            # build the TUI
-make coverage-html  # open coverage.html
+chore test:unit     no server, no container
+chore test:native   the same with -race and a coverage profile
+chore test          everything CI runs: six servers, every driver's
+                    tagged integration tests and the C ABI, in containers
+chore bench         go test -bench=. ./ftp
+chore archives      the nine c-archives into dist/
+chore tui           build the TUI
+chore coverage:html open the HTML report
 ```
+
+`chore --list` is the full set; [chores.yml](../chores.yml) says why
+each task is shaped the way it is.
 
 ### 21. Linting · S
 Add `golangci-lint` with a conservative config (govet, staticcheck,

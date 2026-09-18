@@ -1,12 +1,47 @@
 version: "3"
 chore_min_version: 0.6.0
 
-# THE CONTRACT THIS FILE EXISTS TO OWN.
+# THE ONE ENTRY POINT.
 #
-# How to build go-networkfs is knowledge that belongs to go-networkfs. It used
-# to live in diskjockey/scripts/build-gonetworkfs.sh — 258 lines that knew
-# GOOS, CGO_ENABLED, GOWORK, the ldflags, the source layout of every driver,
-# and a stamp-file freshness scheme, none of which is a consumer's business.
+# This file is how go-networkfs is built, tested and released, and it is the
+# ONLY way. There used to be three: a 406-line Makefile that owned the server
+# containers and every real test entry point, this file with nine tasks that
+# overlapped it and shelled out to `make` once, and a CI workflow that called
+# `make test-docker` for one job and raw `go` commands for the rest. Three ways
+# to run the tests, no single definition of a full run, and a change to how
+# testing works had to be made in up to three places or it was only half made.
+# Issue #8. The Makefile is gone; what it knew is in `scripts/`, and every
+# CI job runs a task from this file.
+#
+# THE NAMES ARE THE FAMILY'S, where the family has one. The constellation's
+# contract is antimatter-studios/fs-linux-test-harness, "Consumer test
+# contract":
+#
+#   chore tools        install and verify what the HOST needs, pinned
+#   chore test:unit    no servers, no containers, nothing to install
+#   chore test         everything CI runs
+#
+# The rest are this repository's genuine extras, and they are extras because
+# this is not a filesystem driver crate: there is no VM, no fixture image and
+# no oracle tool. What it has instead is SIX SERVER CONTAINERS and a C ABI, so
+# `servers:*` and `test:cabi` are here and `fixtures`, `test:oracle` and
+# `test:kernel` are not. A task named after something this repository does not
+# have would be a lie a consumer could read.
+#
+# WHAT THE TESTS RUN AGAINST, and why it is containers.
+#
+#   Every driver that CAN have a server gets one. Without a server a driver's
+#   integration tests sit behind a build tag and are skipped, and its C harness
+#   only ever reaches the failure paths — so the coverage number reports the
+#   unit tests alone, and a broken mount reads exactly like a working one.
+#   There is no in-process Go SMB server to stand in for Samba, and Dropbox,
+#   Google Drive and OneDrive cannot be run locally at all (test/mockapi stands
+#   in for those three, built from this repository so it cannot drift).
+#
+#   Nothing is installed on the machine: it is Docker or it is nothing.
+#   `chore test` goes further and runs the suite INSIDE a container too, so a
+#   contributor needs Docker and nothing else — not even a Go toolchain — and
+#   what CI executes is byte-for-byte what they execute.
 #
 # THIS IS A GO LIBRARY, NOT A RUST ONE. The sibling rust-* libraries expose
 # `staticlib` and produce one archive. This one produces NINE:
@@ -30,39 +65,272 @@ chore_min_version: 0.6.0
 # names a file because that crate produces exactly one. A consumer that
 # assumes a file path will silently copy the wrong thing.
 #
-# dist/ AND build/ ARE DIFFERENT DIRECTORIES ON PURPOSE. `tui` still writes
-# the bubbletea binary into build/, which is where the Makefile puts
-# everything. Keeping the archives apart from it is what lets a consumer copy
-# the WHOLE of dist/ without dragging an unrelated executable along.
+# dist/ AND build/ ARE DIFFERENT DIRECTORIES ON PURPOSE. `tui` writes the
+# bubbletea binary into build/, and so does the C ABI harness. Keeping the
+# archives apart from them is what lets a consumer copy the WHOLE of dist/
+# without dragging an unrelated executable along.
 #
 # There is no cross-compilation and no `rustup target add` equivalent: the Go
 # toolchain builds for the host, and cgo needs the host's C toolchain, so the
 # triple that the Rust siblings have to declare simply does not appear here.
+#
+# QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
+#
+#   A test task prints a VERDICT — one line naming the log — not a transcript.
+#   Nothing is thrown away: the whole run goes to tmp/logs/<tier>.log, a
+#   failure prints the tail of it, and `chore test -- --verbose` (or
+#   FLTH_VERBOSE=1) streams the lot as it happens.
+#
+#   Each tier carries an OUTPUT BUDGET: a line and a byte count that fails the
+#   run with status 65 when the tier prints more than it is allowed to — told
+#   apart from a failing suite by that status. scripts/tier.sh applies it;
+#   scripts/output-budget.sh is the harness's, vendored (this repository is not
+#   a harness consumer and has no sibling pin to fetch it with).
+#
+#     tier      measured            budget           headroom, and why
+#     deps       0-200 / 0-25,000    400 /  40,000   cold-cache downloads, so
+#                                                    not a property of this
+#                                                    repository; warm: nothing
+#     unit         25 /   1,519       40 /   3,000   ~60%: 21 packages, one
+#                                                    line each; a new package
+#                                                    is one more line
+#     native       26 /   2,225       40 /   4,000   ~50%: the same, plus the
+#                                                    coverage total
+#     suite       PENDING             120 /  12,000   the Go suite's 21 lines,
+#                                                    nine C harnesses and the
+#                                                    coverage total
+#     docker      PENDING              40 /   4,000   the servers' six lines
+#                                                    and the inner verdict
+#     smb         PENDING              20 /   2,000   two packages
+#     s3          PENDING              20 /   2,000   two packages
+#     cabi        PENDING             100 /   8,000   nine harnesses
+#
+#   `unit` and `native` were measured on an arm64 Linux host. The five marked
+#   PENDING need Docker, which that host does not have, and are set from the
+#   first green CI run of the pull request that added them — they are the
+#   budgets this file cannot honestly claim to have measured until then, and
+#   they are deliberately the loosest numbers here. Raise one DELIBERATELY
+#   when a tier grows. A budget nobody can breach measures nothing.
+#
+#   Why it is worth a task's while: a passing run that prints three thousand
+#   lines hides the twenty that matter, and every reader pays for it — a person
+#   scrolling, a CI log viewer, and an agent working here, which re-reads its
+#   transcript on every step and so pays for one loud run many times over.
 vars:
-  # THE DRIVER LIST LIVES HERE, and it used to live in three places: this
-  # repo's Makefile (ARCHIVES), diskjockey's chores.yml (NETWORKFS_DRIVERS)
-  # and the default in build-gonetworkfs.sh. Three lists that had to agree
-  # and nothing that checked them. The Makefile still carries its own copy —
-  # it is the older entry point and is not touched here.
+  # THE DRIVER LIST LIVES HERE, and it used to live in three places: the
+  # Makefile (ARCHIVES), this file, and the default in diskjockey's
+  # build-gonetworkfs.sh. Three lists that had to agree and nothing that
+  # checked them. The Makefile's copy went with the Makefile; the other one
+  # that is left is scripts/test-env.sh's DRIVERS, which the C harness reads,
+  # and the last command of `archives` fails if the two disagree.
   #
   # `generates:` below repeats these eight names because a fingerprint pattern
-  # cannot range over a variable. The last command of `archives` fails if any
-  # driver in THIS list produced no archive, so the two disagreeing is a loud
-  # build failure rather than a silent gap in the freshness check.
+  # cannot range over a variable.
   DRIVERS: ftp sftp smb dropbox webdav gdrive s3 onedrive
 
 tasks:
+  # ---------------------------------------------------------------- host tools
+
+  tools:
+    desc: "Install and verify what the HOST needs, pinned: golangci-lint and govulncheck, into tmp/bin"
+    # Into tmp/bin, not $GOPATH/bin: a checkout should not change what the rest
+    # of the machine sees. `--check` is what the gates call first, so a missing
+    # tool fails once naming this task instead of a gate quietly passing having
+    # linted nothing — the family's "never skip" rule.
+    cmds: ['scripts/tools.sh']
+
+  deps:
+    desc: Download the module dependencies (warms the cache so a test tier's output is tests, not downloads)
+    # It exists because of the OUTPUT BUDGETS. On a cold module cache `go test`
+    # prints a `go: downloading` line per module before it says anything about
+    # tests, which would blow a tier's budget on a machine — or a container
+    # volume — that had simply never built this module. Pulled out in front, it
+    # is paid once and the budget stays a measurement of the tests.
+    #
+    # It carries a budget of its own for the same reason, and a loose one: what
+    # it prints depends on how cold the cache is, which is not a property of
+    # this repository. A warm cache prints nothing at all.
+    cmds: ['scripts/tier.sh deps deps 400 40000 -- go mod download']
+
+  deps:verify:
+    desc: Check the downloaded modules against go.sum (the first thing CI does)
+    cmds: ['go mod verify']
+
+  # --------------------------------------------------------------------- gates
+
+  vet:
+    desc: go vet
+    cmds: ['go vet ./...']
+
+  lint:
+    desc: "gofmt -s and golangci-lint — both checks the `lint` job makes"
+    # One script for both, so `chore lint` and the CI job cannot disagree. The
+    # linter is the PINNED binary from `chore tools`, which is what the
+    # golangci-lint action used to provide; the version now lives in
+    # scripts/tools.sh where a bump is a reviewed commit rather than a
+    # workflow's `@latest` changing under a pull request that touched nothing.
+    cmds: ['scripts/lint.sh']
+
+  vulncheck:
+    desc: govulncheck, through the gate that fails on anything not consciously accepted
+    # NOT `govulncheck ./...`: that is all-or-nothing, and one unfixable
+    # finding turns the check permanently red — which is a check that reports
+    # nothing at all. The gate names what is accepted and why, so anything new
+    # still stops the build. The accepted list is currently empty, on purpose.
+    cmds:
+      - 'scripts/tools.sh --check'
+      - 'PATH="$PWD/tmp/bin:$PATH" scripts/govulncheck-gate.sh'
+
+  tidy:
+    desc: go mod tidy, then verify
+    cmds:
+      - 'go mod tidy'
+      - task: deps:verify
+
+  # --------------------------------------------------------------------- tests
+
+  test:unit:
+    desc: "The tests that need no server and no container — what runs anywhere, on anything"
+    # `-short` is exactly that split: the FTP and SFTP suites start embedded
+    # in-process servers and skip themselves under it, and the tagged
+    # integration tests are not built at all. Nothing here needs Docker, a
+    # credential or a network.
+    cmds:
+      - task: deps
+      - 'scripts/tier.sh test:unit unit 40 3000 -- go test -race -short ./...'
+
+  test:native:
+    desc: "The suite on this host with the race detector and a coverage profile — still no containers"
+    # What CI's `test (ubuntu-latest)` and `test (macos-latest)` jobs run, and
+    # the reason they are two jobs: cgo, the SMB client and the TUI all behave
+    # differently on Darwin, and a Linux-only gate would not see it.
+    #
+    # Its coverage figure is NOT the honest one — the driver code behind the
+    # integration tags is compiled out, so most of each driver reads as
+    # untested. `test:integration` produces the number that means something.
+    cmds:
+      - task: deps
+      - 'scripts/tier.sh test:native native 40 4000 -- go test ./... -race -covermode=atomic -coverprofile=coverage.out'
+      - 'go tool cover -func=coverage.out | tail -1'
+
+  test:smb:
+    desc: SMB driver integration tests against a throwaway Samba container
+    # THE SMB DRIVER CANNOT BE TESTED WITHOUT A SERVER, and unlike ftp there is
+    # no in-process Go SMB server to stand one up with. That is why these tests
+    # sit behind the smb_integration build tag and why `test:native` does not
+    # run them: without this task they are skipped everywhere, forever, and the
+    # driver's coverage is the unit tests alone.
+    #
+    # with-servers.sh brings Samba up, exports the addresses and takes it down
+    # however the tests end — a trap, because a failing test used to leave the
+    # container running and the next run then failed on a bound port.
+    cmds:
+      - 'scripts/with-servers.sh samba -- scripts/tier.sh test:smb smb 20 2000 -- go test -race -count=1 -tags=smb_integration -run Integration ./smb/...'
+
+  test:s3:
+    desc: S3 driver integration tests against a throwaway S3 server
+    cmds:
+      - 'scripts/with-servers.sh s3 -- scripts/tier.sh test:s3 s3 20 2000 -- go test -race -count=1 -tags=s3_integration -run Integration ./s3/...'
+
+  test:cabi:
+    desc: "The C ABI, exercised from C against real servers — the only caller that can reach three of its entry points"
+    # A Go test file may not import "C", so it cannot name a ByteSlice or a
+    # size_t, so it cannot call networkfs_openfile, networkfs_writefile or
+    # setOutBytes at all. A C program linking the shipped archive can, and
+    # that is also exactly how a consumer uses it.
+    cmds:
+      - task: deps
+      - 'scripts/with-servers.sh all -- scripts/tier.sh test:cabi cabi 100 8000 -- scripts/cabi.sh all'
+
+  test:integration:
+    desc: "Every driver that needs a server, on this host's toolchain, with one coverage profile over the lot"
+    # The same work `test` does, without the runner container: for a developer
+    # who has Go and a C compiler and wants the edit-run loop rather than an
+    # image build. `test` is what CI runs and what a bug report should quote.
+    cmds:
+      - task: deps
+      - 'scripts/with-servers.sh all -- scripts/tier.sh test:integration suite 120 12000 -- scripts/suite.sh'
+
+  test:ci:
+    desc: "The suite with the servers ALREADY up — what runs inside the runner container"
+    # It starts nothing and tears nothing down, because inside the container
+    # the servers belong to the host. Run it by hand after `chore servers:up`
+    # and you get the same run without the image build.
+    cmds:
+      - task: deps
+      - 'scripts/tier.sh test:ci suite 120 12000 -- scripts/suite.sh'
+
+  test:
+    desc: "Everything CI runs: every server, the whole tagged suite and the C ABI, inside a container"
+    # WHAT `chore test` MEANS HERE is the containerised run, and that is a
+    # deliberate change from what it used to mean (a bare `go test ./...`).
+    # "Everything CI runs" is the family's contract for this name, and the only
+    # run that executes every driver's integration tests and the C ABI is this
+    # one. The old meaning is `chore test:native`.
+    #
+    # The servers run on the host and join a shared Docker network; the runner
+    # joins it and reaches them BY NAME on their internal ports. So the only
+    # thing this machine needs is Docker — no Go toolchain, no C compiler — and
+    # the `integration (containerised)` job runs this exact task.
+    cmds:
+      - 'scripts/tier.sh test docker 40 4000 -- scripts/docker-suite.sh'
+
+  bench:
+    desc: Streaming and list benchmarks against the embedded FTP server
+    cmds: ['go test -run=^$ -bench=. -benchmem ./ftp/...']
+
+  coverage:html:
+    desc: Open an HTML coverage report for the last profile in the browser
+    # No `deps:`, deliberately: which profile you want to look at is the
+    # question. `test:native` writes a unit-only one; `test`, `test:ci` and
+    # `test:integration` write the one with the drivers and the C ABI in it.
+    cmds:
+      - |
+        set -eu
+        [ -f coverage.out ] || {
+          echo "no coverage.out — run 'chore test' (or 'chore test:native')." >&2
+          exit 1
+        }
+        go tool cover -html=coverage.out
+
+  # ------------------------------------------------------------------- servers
+
+  servers:up:
+    desc: "Start the test servers (samba s3 ftp sftp webdav mockapi; default: all) and wait until each answers"
+    # HERE SO A DEVELOPER CAN BRING THEM UP WITHOUT READING A MAKEFILE. It used
+    # to take `make samba-up` — and knowing that `make test-smb` would take it
+    # down again underneath you. Bring them up, run tests against them for an
+    # afternoon, `chore servers:down` when done.
+    #
+    #   chore servers:up            every server
+    #   chore servers:up -- samba   just that one
+    cmds: ['scripts/servers.sh up {{.CLI_ARGS}}']
+
+  servers:down:
+    desc: "Remove the test servers (default: all, and the shared network)"
+    cmds: ['scripts/servers.sh down {{.CLI_ARGS}}']
+
+  servers:status:
+    desc: Which test servers are running
+    cmds: ['scripts/servers.sh status']
+
+  servers:env:
+    desc: "Print the environment a tagged test needs to reach the running servers (eval it into a shell)"
+    silent: true
+    cmds: ['scripts/servers.sh env']
+
+  # ------------------------------------------------------------------- outputs
+
   archives:
     desc: Build every driver c-archive plus the combined dispatcher into dist/
     # NO `out` ARGUMENT, deliberately — see the header. The consumer asks
     # `artifact` where the output is and copies from there.
     #
-    # `extra` IS NOW THE FIRST POSITIONAL, which used to be `out`. So the old
-    # spelling `chore archives /some/dir` is no longer an error: it binds the
-    # path to `extra` and the loop reports `driver '/some/dir' has no
+    # `extra` IS THE FIRST POSITIONAL, where the Makefile-era spelling had
+    # `out`. So `chore archives /some/dir` is not an error: it binds the path
+    # to `extra` and the loop reports `driver '/some/dir' has no
     # ./some/dir/cmd//some/dir, skipping` and carries on. Loud enough to read,
-    # and nothing is written outside dist/ — but it is the one spelling that
-    # changed meaning rather than breaking.
+    # and nothing is written outside dist/.
     args:
       - name: extra
         desc: also build this driver, in addition to the default set
@@ -160,6 +428,26 @@ tasks:
         fi
         echo "go-networkfs: archives in $out"
 
+  archives:host:
+    desc: "The same archives, built for THIS host rather than darwin — what the `c-archive builds` job checks"
+    # `archives` cross-builds for darwin because its consumer is a macOS app.
+    # CI has to prove the c-archive path still links on the machine it is on —
+    # on ubuntu AND on macos — which is a different question and so a different
+    # task. It writes to build/, not dist/, so a CI run cannot be mistaken for
+    # a shippable artifact.
+    vars:
+      OUT: 'build'
+    cmds:
+      - |
+        set -euo pipefail
+        out="{{.OUT}}"
+        mkdir -p "$out"
+        for d in {{.DRIVERS}}; do
+          CGO_ENABLED=1 go build -buildmode=c-archive -o "$out/lib$d.a" "./$d/cmd/$d"
+        done
+        CGO_ENABLED=1 go build -buildmode=c-archive -o "$out/libnetworkfs.a" ./cmd/networkfs
+        echo "go-networkfs: host archives in $out"
+
   tui:
     desc: Build the bubbletea TUI binary into OUT
     args: [out]
@@ -169,50 +457,18 @@ tasks:
       - 'mkdir -p "{{.OUT}}"'
       - 'go build -o "{{.OUT}}/networkfs" ./cmd/tui'
 
-  test:
-    desc: Test suite, with the race detector and a coverage profile
-    cmds:
-      - 'go test -race -covermode=atomic -coverprofile=coverage.out ./...'
-      - 'go tool cover -func=coverage.out | tail -1'
-
-  test:short:
-    desc: Skip the integration tests that start embedded servers
-    cmds: ['go test -race -short ./...']
-
-  test:smb:
-    desc: SMB driver integration tests against a throwaway Samba container
-    # THE SMB DRIVER CANNOT BE TESTED WITHOUT A SERVER, and unlike ftp there
-    # is no in-process Go SMB server to stand one up with. That is why these
-    # tests sit behind the smb_integration build tag and why `test` does not
-    # run them: without this task they are skipped everywhere, forever, and
-    # the driver's coverage is the unit tests alone.
-    #
-    # The Makefile owns the container lifecycle so both entry points start
-    # the same server rather than two that drift.
-    cmds: ['make test-smb']
-
-  vet:
-    desc: go vet
-    cmds: ['go vet ./...']
-
-  tidy:
-    desc: go mod tidy, then verify
-    cmds:
-      - 'go mod tidy'
-      - 'go mod verify'
-
   clean:
-    desc: Remove the build output and the coverage profile
-    # TWO DIRECTORIES, because `archives` and `tui` no longer share one:
-    # dist/ is where `archives` puts the c-archives, build/ is where `tui`
-    # puts the bubbletea binary and is what `out` still names. Naming dist
-    # literally rather than through `out` means `chore clean somewhere-else`
-    # still clears the archives.
+    desc: Remove the build output, the coverage profile, the logs and the pinned tools
+    # THREE DIRECTORIES, because they are three different things: dist/ is what
+    # `archives` ships, build/ is where `tui`, `archives:host` and the C ABI
+    # harness put working files, and tmp/ holds the logs and the tools
+    # `chore tools` pinned. Naming dist and tmp literally rather than through
+    # `out` means `chore clean somewhere-else` still clears them.
     args: [out]
     vars:
       OUT: '{{.OUT | default "build"}}'
     cmds:
-      - 'rm -rf "{{.OUT}}" dist coverage.out'
+      - 'rm -rf "{{.OUT}}" dist tmp coverage.out'
 
   artifact:
     desc: Print the absolute path of the directory holding the built archives

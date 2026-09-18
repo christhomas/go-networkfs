@@ -1,9 +1,47 @@
 name: CI
 
+# EVERY JOB RUNS CHORE TASKS. There is no `make` here and no raw `go` command:
+# what this workflow runs is what a contributor runs, so "green locally" and
+# "green in CI" are the same evidence (issue #8, and the test contract at the
+# top of chores.yml).
+#
+#   test (os)                 `chore deps:verify`, `chore vet`, `chore test:native`
+#                             — the suite with the race detector on both
+#                             platforms. No servers: cgo, the SMB client and the
+#                             TUI differ on Darwin, and that is what two jobs buy.
+#   integration (containerised) `chore test` — every server, every driver's tagged
+#                             integration tests and the C ABI harnesses, all
+#                             inside containers. This is the job whose coverage
+#                             number means anything.
+#   lint                      `chore lint` — gofmt -s and the pinned golangci-lint.
+#   govulncheck               `chore vulncheck` — through the accepted-findings
+#                             gate, not a bare `govulncheck ./...`.
+#   c-archive builds (os)     `chore archives:host`, `chore tui` — that the
+#                             c-archive path still links on each platform.
+#
+# THE JOB NAMES ARE LOAD-BearING: they are the required checks in `.github-guard`
+# on the default branch. Renaming one here without changing that file strands
+# every merge.
+#
+# THE OUTPUT BUDGET IS IN THE TASKS, so it is in this workflow too. Each tier
+# writes its full output to tmp/logs/<tier>.log and prints a verdict; a tier
+# that prints more than its measured budget FAILS with status 65, which is how
+# a job that starts emitting thousands of lines turns red here rather than
+# being noticed by whoever scrolls it next. The logs are uploaded, so nothing
+# is lost by the terminal being quiet.
+
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # One pin for every job. chore is how this repository is driven, so it is
+  # installed before anything else and checked against the release checksums.
+  CHORE_VERSION: "0.11.0"
 
 jobs:
   test:
@@ -21,23 +59,27 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go mod verify
-        run: go mod verify
+      - name: install chore
+        run: scripts/ci-install-chore.sh
 
-      - name: go vet
-        run: go vet ./...
+      - name: chore deps:verify
+        run: chore deps:verify
 
-      - name: test with coverage
-        run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+      - name: chore vet
+        run: chore vet
 
-      - name: coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+      # Quiet: one verdict line naming tmp/logs/native.log, which is uploaded
+      # below. A failure prints the tail of it here.
+      - name: chore test:native
+        run: chore test:native
 
       - uses: actions/upload-artifact@v4
-        if: matrix.os == 'ubuntu-latest'
+        if: always() && matrix.os == 'ubuntu-latest'
         with:
           name: coverage
-          path: coverage.out
+          path: |
+            coverage.out
+            tmp/logs/
 
   integration:
     name: integration (containerised)
@@ -46,22 +88,27 @@ jobs:
       - uses: actions/checkout@v4
 
       # Everything runs inside containers: six servers for the drivers that
-      # need one, and a runner carrying the Go toolchain and a C compiler. No
-      # toolchain is installed on the runner image, so what CI executes is what
-      # a contributor executes with `make test-docker`.
+      # need one, and a runner carrying the Go toolchain, a C compiler and
+      # chore. No toolchain is installed on this runner, so what CI executes is
+      # what a contributor executes with `chore test`.
       #
       # The S3 server (stupid-simple-s3) is the one that also runs natively —
-      # `make test-s3` fetches its pinned binary and needs no daemon. It stays
+      # `chore test:s3` fetches its pinned binary and needs no daemon. It stays
       # a container here so it can join the shared network and be reached by
       # name, the same as the other five. Every image is pinned.
-      - name: Full suite against containerised servers
-        run: make test-docker
+      - name: install chore
+        run: scripts/ci-install-chore.sh
+
+      - name: chore test
+        run: chore test
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-coverage
-          path: coverage.out
+          path: |
+            coverage.out
+            tmp/logs/
 
   lint:
     name: lint
@@ -74,18 +121,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: gofmt
-        run: |
-          out=$(gofmt -l -s .)
-          if [ -n "$out" ]; then
-            echo "gofmt -s would reformat:"
-            echo "$out"
-            exit 1
-          fi
+      - name: install chore
+        run: scripts/ci-install-chore.sh
 
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.11.4
+      # The pinned golangci-lint, fetched as the release binary — the same one
+      # golangci/golangci-lint-action used to install, now installed by a task
+      # so `chore lint` locally is this job.
+      - name: chore tools
+        run: chore tools
+
+      - name: chore lint
+        run: chore lint
 
   vulncheck:
     name: govulncheck
@@ -98,16 +144,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: install chore
+        run: scripts/ci-install-chore.sh
+
+      - name: chore tools
+        run: chore tools
 
       # Not `govulncheck ./...` directly: the gate fails on anything this
-      # project calls that has not been consciously accepted, and the
-      # accepted list carries the reason each one is there. A check that
-      # is permanently red because of one unfixable finding reports
-      # nothing at all.
-      - name: govulncheck
-        run: ./scripts/govulncheck-gate.sh
+      # project calls that has not been consciously accepted, and the accepted
+      # list carries the reason each one is there. A check that is permanently
+      # red because of one unfixable finding reports nothing at all.
+      - name: chore vulncheck
+        run: chore vulncheck
 
   build-archives:
     name: c-archive builds (${{ matrix.os }})
@@ -124,32 +172,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: build libftp.a
-        run: go build -buildmode=c-archive -o libftp.a ./ftp/cmd/ftp
+      - name: install chore
+        run: scripts/ci-install-chore.sh
 
-      - name: build libsftp.a
-        run: go build -buildmode=c-archive -o libsftp.a ./sftp/cmd/sftp
+      # `archives:host`, not `archives`: the shipping task cross-builds for
+      # darwin because its consumer is a macOS app, and what this job is for is
+      # that the c-archive path still links on the machine it is running on.
+      # One task, nine archives — the nine `go build` steps this replaced could
+      # drift from the driver list and did not check it.
+      - name: chore archives:host
+        run: chore archives:host
 
-      - name: build libsmb.a
-        run: go build -buildmode=c-archive -o libsmb.a ./smb/cmd/smb
-
-      - name: build libdropbox.a
-        run: go build -buildmode=c-archive -o libdropbox.a ./dropbox/cmd/dropbox
-
-      - name: build libwebdav.a
-        run: go build -buildmode=c-archive -o libwebdav.a ./webdav/cmd/webdav
-
-      - name: build libgdrive.a
-        run: go build -buildmode=c-archive -o libgdrive.a ./gdrive/cmd/gdrive
-
-      - name: build libs3.a
-        run: go build -buildmode=c-archive -o libs3.a ./s3/cmd/s3
-
-      - name: build libonedrive.a
-        run: go build -buildmode=c-archive -o libonedrive.a ./onedrive/cmd/onedrive
-
-      - name: build libnetworkfs.a (unified dispatcher)
-        run: go build -buildmode=c-archive -o libnetworkfs.a ./cmd/networkfs
-
-      - name: build tui
-        run: go build -o networkfs ./cmd/tui
+      - name: chore tui
+        run: chore tui

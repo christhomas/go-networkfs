@@ -149,7 +149,7 @@ static void test_operations_on_unknown_mount(void) {
 // — setOutBytes hands a buffer and a length back across the boundary, and it
 // is only reached when a read actually succeeds.
 //
-// These run when SMB_HOST is set, which `make test-cabi` does after starting
+// These run when SMB_HOST is set, which `chore test:cabi` does after starting
 // the Samba container.
 
 static int have_server(void) { return getenv("SMB_HOST") != NULL; }

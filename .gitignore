@@ -27,3 +27,8 @@ coverage.html
 # C ABI harness build output
 /build/cabi/
 /build/cabi-cover/
+
+# Scratch: tmp/logs/<tier>.log (what a quiet test task writes and names) and
+# tmp/bin (the pinned golangci-lint and govulncheck `chore tools` installs).
+# Derived, per-machine, and `chore clean` removes it.
+/tmp/

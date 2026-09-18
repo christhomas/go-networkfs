@@ -98,7 +98,7 @@ static void test_operations_unmounted(void) {
 // back across the boundary and is reached only when a read succeeds.
 //
 // This runs when CABI_CONFIG holds a config JSON document for this driver,
-// which `make test-cabi` supplies for the drivers that have a server.
+// which `chore test:cabi` supplies for the drivers that have a server.
 static void test_mounted_round_trip(void) {
     const char *cfg = getenv("CABI_CONFIG");
     if (!cfg || cfg[0] == '\0') {

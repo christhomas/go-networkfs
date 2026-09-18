@@ -1,0 +1,14 @@
+# What is NOT sent as build context.
+#
+# Both images are built from the repository root — the mock API server is
+# compiled from test/mockapi, and the test runner copies
+# scripts/ci-install-chore.sh — so without this the whole history and every
+# build artefact goes to the daemon on each build, which is slow and puts
+# host-built binaries where a container might pick them up.
+.git
+build/
+dist/
+tmp/
+coverage.out
+*.a
+*.h
