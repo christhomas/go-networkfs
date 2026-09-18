@@ -45,10 +45,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Everything runs inside containers: five servers for the drivers that
+      # Everything runs inside containers: six servers for the drivers that
       # need one, and a runner carrying the Go toolchain and a C compiler. No
       # toolchain is installed on the runner image, so what CI executes is what
       # a contributor executes with `make test-docker`.
+      #
+      # The S3 server (stupid-simple-s3) is the one that also runs natively —
+      # `make test-s3` fetches its pinned binary and needs no daemon. It stays
+      # a container here so it can join the shared network and be reached by
+      # name, the same as the other five. Every image is pinned.
       - name: Full suite against containerised servers
         run: make test-docker
 
