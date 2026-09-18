@@ -73,10 +73,15 @@ jobs:
       - name: chore test:native
         run: chore test:native
 
+      # BOTH platforms, because the log is where the detail went. A tier that
+      # breaches its output budget says how big it was and nothing about what
+      # was in it, so the run that has to be diagnosed is exactly the one whose
+      # log must be here — and the platform that prints more is the one that
+      # was not uploading anything.
       - uses: actions/upload-artifact@v4
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always()
         with:
-          name: coverage
+          name: coverage-${{ matrix.os }}
           path: |
             coverage.out
             tmp/logs/
