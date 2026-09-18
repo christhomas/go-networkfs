@@ -6,14 +6,14 @@
 # do not need a container the way the SMB ones need Samba. This fetches
 # the pinned release build for the host platform, checks it against the
 # published SHA-256, and runs it from build/. A contributor on Linux or
-# macOS gets a real S3 server from `make test-s3` with nothing installed
+# macOS gets a real S3 server from `chore test:s3` with nothing installed
 # by hand and no Docker daemon.
 #
-# The containerised path still exists (`make sss3-up`) and is what CI's
-# integration job uses, because there every server is a container on a
+# The containerised path still exists (`chore servers:up -- s3`) and is what
+# CI's integration job uses, because there every server is a container on a
 # shared network and the runner reaches them by name.
 #
-# Usage: sss3-server.sh up|down
+# Usage: sss3-server.sh up|down|status
 set -euo pipefail
 
 # Pinned. Nothing here resolves a floating tag: a test server that can
@@ -54,12 +54,12 @@ platform() {
 	case "$(uname -s)" in
 	Linux) os=linux ;;
 	Darwin) os=darwin ;;
-	*) die "sss3: unsupported OS $(uname -s); use 'make sss3-up' for the container" ;;
+	*) die "sss3: unsupported OS $(uname -s); use 'chore servers:up -- s3' for the container" ;;
 	esac
 	case "$(uname -m)" in
 	x86_64 | amd64) arch=amd64 ;;
 	arm64 | aarch64) arch=arm64 ;;
-	*) die "sss3: unsupported arch $(uname -m); use 'make sss3-up' for the container" ;;
+	*) die "sss3: unsupported arch $(uname -m); use 'chore servers:up -- s3' for the container" ;;
 	esac
 	echo "$os-$arch"
 }
@@ -136,11 +136,21 @@ down() {
 	fi
 }
 
+# Exit 0 when a server this script started is alive and answering, 1 otherwise.
+# Both halves matter: a pid that is gone and a pid that is there but wedged are
+# the same answer to "can I run the S3 tests".
+status() {
+	[ -f "$PIDFILE" ] || return 1
+	kill -0 "$(cat "$PIDFILE")" 2>/dev/null || return 1
+	curl -fsS -o /dev/null "http://127.0.0.1:$PORT/healthz" 2>/dev/null
+}
+
 case "${1:-}" in
 up) up ;;
 down) down ;;
+status) status ;;
 *)
-	echo "usage: $0 up|down" >&2
+	echo "usage: $0 up|down|status" >&2
 	exit 2
 	;;
 esac

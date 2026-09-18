@@ -99,7 +99,7 @@ Passed to `Mount` as `map[string]string` (Go) or a JSON object (C ABI).
 - Mount / list / stat / read / write / mkdir / rename / remove on every
   driver, exercised by 159 unit + integration tests (see [Test
   contract](#test-contract)).
-- `make archives` builds 9 c-archives (8 per-driver + the combined
+- `chore archives` builds 9 c-archives (8 per-driver + the combined
   `libnetworkfs.a`) cleanly on Linux and macOS in CI.
 - TUI file browser (`cmd/tui`) drives every registered driver
   interactively, including config-form generation per driver schema and
@@ -164,8 +164,11 @@ ok  webdav           11 unit + httptest integration (x/net/webdav handler)
 ```
 
 **Total: 159 tests across 12 packages.** All passing on the audit
-HEAD. Run with `make test` (race detector + coverage). Run with `make
-test-short` to skip suites that bring up embedded servers.
+HEAD. Run with `chore test:native` (race detector + coverage), or
+`chore test:unit` to skip the suites that bring up embedded servers.
+`chore test` is more than this table: it adds every driver's tagged
+integration tests against real servers and the C ABI harnesses, which
+is the run whose coverage figure means anything.
 
 Mocked vs. real:
 - **In-process fakes:** Dropbox, OneDrive, GDrive, WebDAV
@@ -178,8 +181,8 @@ Mocked vs. real:
   end-to-end (`dropbox_integration` build tag) — both require real
   credentials and are skipped in CI.
 - **Real server, no credentials:** S3 (`s3_integration` build tag)
-  against stupid-simple-s3 — `make test-s3` brings one up and takes it
-  down, Docker or not.
+  against stupid-simple-s3 — `chore test:s3` brings one up and takes it
+  down, and needs no Docker to do it.
 - **Docker harness:** `test-server/docker-compose.yml` brings up
   vsftpd / openssh-sftp / apache-webdav / samba on local ports; four
   matching `.env.yaml` presets feed the TUI directly.
@@ -258,29 +261,68 @@ MIT. See [LICENSE](LICENSE) for the project license. Every direct
 and transitive dep is permissive — MIT / BSD-2 / BSD-3 / ISC /
 Apache-2.0 / weak-copyleft MPL-2.0; no GPL anywhere.
 
-## Building
+## Building and testing
+
+[`chore`](https://github.com/antimatter-studios/chore) is the only entry
+point — there is no Makefile, and CI runs these same tasks:
 
 ```bash
-make test            # go test -race with coverage
-make test-short      # skip suites that bring up embedded servers
-make bench           # streaming + list benches against the embedded FTP server
-make archives        # 8 per-driver .a + libnetworkfs.a dispatcher in build/
-make tui             # build/networkfs (TUI binary)
-make coverage-html   # open HTML coverage report
-make vet             # go vet
-make tidy            # go mod tidy && go mod verify
+brew install antimatter-studios/tap/chore    # or: go install github.com/antimatter-studios/chore@latest
+chore --list
 ```
 
-`make archives` produces:
+| Task | What it does |
+|---|---|
+| `chore test:unit` | The tests that need no server and no container — runs anywhere, on anything. |
+| `chore test:native` | The same suite with the race detector and a coverage profile, still no containers. CI's `test (ubuntu-latest)` / `test (macos-latest)`. |
+| `chore test` | **Everything CI runs**: six server containers, every driver's tagged integration tests and the C ABI harnesses, all inside containers. Needs Docker and nothing else — no Go toolchain, no C compiler. |
+| `chore test:integration` | The same full run on this host's toolchain, without the runner container — the edit-run loop. |
+| `chore test:ci` | The suite against servers that are ALREADY up; what runs inside the runner container. |
+| `chore test:smb` | The SMB driver against a throwaway Samba container. |
+| `chore test:s3` | The S3 driver against a throwaway [stupid-simple-s3][sss3] — the pinned binary, so **no Docker**. |
+| `chore test:cabi` | The C ABI harnesses (C programs linking the shipped archives) against real servers. |
+| `chore servers:up`, `servers:down`, `servers:status`, `servers:env` | The test servers by hand: `chore servers:up -- samba` for one, no arguments for all six, `-- s3-native` for the daemonless S3 server. |
+| `chore lint`, `chore vet`, `chore vulncheck` | The gates, exactly as CI runs them. |
+| `chore tools` | Install the pinned golangci-lint and govulncheck into `tmp/bin`. |
+| `chore tidy`, `chore deps`, `chore deps:verify` | Module housekeeping. |
+| `chore archives` | The nine c-archives (darwin, for the macOS consumer) into `dist/`; `chore artifact` prints that directory. |
+| `chore archives:host` | The same nine built for THIS host — what the `c-archive builds` job checks. |
+| `chore tui` | `build/networkfs`, the TUI binary. |
+| `chore bench` | Streaming and list benchmarks against the embedded FTP server. |
+| `chore coverage:html` | Open an HTML report for the last coverage profile. |
+| `chore clean` | Remove `build/`, `dist/`, `tmp/` and `coverage.out`. |
+
+**Output is quiet by default.** A test task prints one verdict line and
+the path of the log holding the whole run (`tmp/logs/<tier>.log`); a
+failure prints the tail of that log. `chore test -- --verbose` (or
+`FLTH_VERBOSE=1`) streams everything as it happens. Each tier also
+carries an output budget — a run that passes but prints more than its
+measured budget fails with status 65 — and the measured table is at the
+top of [chores.yml](chores.yml).
+
+`chore archives` produces:
 
 ```
-build/libftp.a       libsftp.a       libsmb.a        libdropbox.a
-build/libwebdav.a    libgdrive.a     libs3.a         libonedrive.a
-build/libnetworkfs.a   <- combined dispatcher (every driver registered)
+dist/libftp.a       libsftp.a       libsmb.a        libdropbox.a
+dist/libwebdav.a    libgdrive.a     libs3.a         libonedrive.a
+dist/libnetworkfs.a   <- combined dispatcher (every driver registered)
 ```
 
-Each archive ships a generated header file (`build/lib<name>.h`)
-declaring the C entrypoints.
+Each archive ships a generated header file (`dist/lib<name>.h`)
+declaring the C entrypoints. `chore artifact` prints the absolute path
+of `dist/` — it is a DIRECTORY, not a file, because one build produces
+eighteen of them, and a consumer copies the contents.
+
+`networkfs_mount` return codes: `0` success, `1` unknown driver type,
+`2` mount failed, `-1` invalid JSON. `networkfs_get_stats` returns
+zero counters for drivers that don't implement `StatsProvider`.
+
+In a Swift package, drop the `.a` and `.h` into a binary target and
+declare a bridging header:
+
+```swift
+.binaryTarget(name: "Networkfs", path: "Frameworks/libnetworkfs.xcframework"),
+```
 
 ### Embedding in Go
 
@@ -367,7 +409,7 @@ declare a bridging header:
 A Bubble Tea TUI in [cmd/tui](cmd/tui) for interactive smoke-testing:
 
 ```bash
-make tui
+chore tui
 ./build/networkfs                            # interactive driver picker
 ./build/networkfs --account docker-ftp       # pre-configured (.env.yaml)
 ./build/networkfs --account docker-ftp /path # non-interactive listing
@@ -404,7 +446,7 @@ self-hosted in a way that matches their real API surface). Their
 end-to-end integration tests live behind `//go:build <name>_integration`
 tags and require real credentials.
 
-S3 is self-hostable and so is not in that list: `make test-s3` runs the
+S3 is self-hostable and so is not in that list: `chore test:s3` runs the
 tests against a real [stupid-simple-s3][sss3] with no Docker and no
 credentials. What it does not cover is noted in
 [docs/DRIVERS.md](docs/DRIVERS.md#s3-test-server).
@@ -462,14 +504,19 @@ symbols and DWARF info for debugging from the host side.
 
 ## CI
 
-Every push and PR runs (ubuntu-latest + macos-latest matrix):
+Every job runs a chore task, so a green local run and a green CI run are
+the same evidence:
 
-- `go test -race` with coverage
-- `go vet`
-- `gofmt -s` check
-- `golangci-lint`
-- `govulncheck`
-- All 9 c-archive builds + the TUI binary
+| Job | Runs |
+|---|---|
+| `test (ubuntu-latest)`, `test (macos-latest)` | `chore deps:verify`, `chore vet`, `chore test:native` |
+| `integration (containerised)` | `chore test` — six servers, every tagged integration test, the C ABI harnesses, and the coverage profile that includes them |
+| `lint` | `chore tools`, `chore lint` (gofmt -s + the pinned golangci-lint) |
+| `govulncheck` | `chore tools`, `chore vulncheck` |
+| `c-archive builds (ubuntu-latest)`, `(macos-latest)` | `chore archives:host`, `chore tui` |
+
+These job names are the required checks in `.github-guard`; renaming one
+without changing that file strands every merge.
 
 The pre-commit hook (`./scripts/install-hooks.sh`) runs the fast subset
 locally — `gofmt -s` + `go vet`. Bypass with `git commit --no-verify`.
