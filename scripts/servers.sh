@@ -109,9 +109,21 @@ ensure_image() {   # $1 = image reference
 # netcat — this one, and a bare Debian — got a forty-second wait and
 # "did not answer on port 4445", which names the server for the absence of a
 # tool. /dev/tcp is the shell's own and needs nothing installed.
+# IT ALSO WATCHES THE CONTAINER, because the published port is not evidence
+# that anything is alive: `docker run -p` starts a proxy on the host that
+# accepts connections whether or not the process inside is still there, so a
+# container that exited on startup passes a port check. Measured on arm64,
+# where two of these images are amd64-only: both exited with "exec format
+# error" and both were reported ready, and the truth arrived a minute later as
+# a C harness failing to mount.
 wait_for_port() {   # $1 = container, $2 = published port
     local container="$1" port="$2"
     for _ in $(seq 1 40); do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != true ]; then
+            echo "servers.sh: $container exited before it answered on port $port" >&2
+            docker logs "$container" >&2 || true
+            return 1
+        fi
         if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
             exec 3<&- 3>&-
             return 0
