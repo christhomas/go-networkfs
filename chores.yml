@@ -117,19 +117,25 @@ chore_min_version: 0.6.0
 #                                                    each. That is 80% of this
 #                                                    tier and it is go test's
 #                                                    doing, not ours
-#     docker      PENDING              40 /   4,000   the servers' six lines
-#                                                    and the inner verdict
-#     smb         PENDING              20 /   2,000   two packages
-#     s3          PENDING              20 /   2,000   two packages
-#     cabi        PENDING             100 /   8,000   nine harnesses
+#     docker        8 /     423       20 /   2,000   six server lines and two
+#                                                    verdicts. It was 167 lines
+#                                                    until the image pulls were
+#                                                    quieted, which is what a
+#                                                    budget is for
+#     smb           2 /     130       20 /   2,000   two packages
+#     s3            2 /     127       20 /   2,000   two packages
+#     cabi          9 /    ~300       30 /   3,000   DERIVED, not measured: no
+#                                                    CI job runs this tier on
+#                                                    its own, but `suite` runs
+#                                                    the same nine harnesses and
+#                                                    their output in that log is
+#                                                    nine lines. Measure it
+#                                                    properly when a job does
 #
-#   `native` was measured in CI on both platforms and the budget is the louder
-#   one's; `unit` on an arm64 Linux host. The five marked
-#   PENDING need Docker, which that host does not have, and are set from the
-#   first green CI run of the pull request that added them — they are the
-#   budgets this file cannot honestly claim to have measured until then, and
-#   they are deliberately the loosest numbers here. Raise one DELIBERATELY
-#   when a tier grows. A budget nobody can breach measures nothing.
+#   `native`, `suite` and `docker` were measured in CI — `native` on both
+#   platforms, with the budget set from the louder one; `unit`, `smb` and `s3`
+#   on an arm64 Linux host. Raise one DELIBERATELY when a tier grows. A budget
+#   nobody can breach measures nothing.
 #
 #   Why it is worth a task's while: a passing run that prints three thousand
 #   lines hides the twenty that matter, and every reader pays for it — a person
@@ -267,7 +273,7 @@ tasks:
     # that is also exactly how a consumer uses it.
     cmds:
       - task: deps
-      - 'scripts/with-servers.sh all -- scripts/tier.sh test:cabi cabi 100 8000 -- scripts/cabi.sh all'
+      - 'scripts/with-servers.sh all -- scripts/tier.sh test:cabi cabi 30 3000 -- scripts/cabi.sh all'
 
   test:integration:
     desc: "Every driver that needs a server, on this host's toolchain, with one coverage profile over the lot"
@@ -300,7 +306,7 @@ tasks:
     # thing this machine needs is Docker — no Go toolchain, no C compiler — and
     # the `integration (containerised)` job runs this exact task.
     cmds:
-      - 'scripts/tier.sh test docker 40 4000 -- scripts/docker-suite.sh'
+      - 'scripts/tier.sh test docker 20 2000 -- scripts/docker-suite.sh'
 
   bench:
     desc: Streaming and list benchmarks against the embedded FTP server
