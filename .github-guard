@@ -1,0 +1,16 @@
+# .github-guard — declarations github-guard reads from the default branch on
+# GitHub. See antimatter-studios/agent-skills, skill github-guard.
+#
+# [checks] required — what branch protection demands before main takes a merge.
+# Every job ci.yml produces is listed, because this repo has no single
+# always-run aggregate gate yet. `integration (containerised)` is the one that
+# drives the real servers, so a merge without it says nothing; when an
+# aggregate gate is added, replace these with it.
+[checks]
+	required = lint
+	required = test (ubuntu-latest)
+	required = test (macos-latest)
+	required = c-archive builds (ubuntu-latest)
+	required = c-archive builds (macos-latest)
+	required = integration (containerised)
+	required = govulncheck
