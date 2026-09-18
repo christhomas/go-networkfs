@@ -1,10 +1,10 @@
 # The mock API server, built from test/mockapi.
 #
 # Dropbox, Google Drive and OneDrive cannot be run locally the way Samba or
-# MinIO can. This stands in for all three so the drivers that use them can be
-# tested without any connected service — including from the C ABI harnesses,
-# which are separate programs and cannot reach an in-process fake.
-FROM golang:1.25-bookworm AS build
+# stupid-simple-s3 can. This stands in for all three so the drivers that use
+# them can be tested without any connected service — including from the C ABI
+# harnesses, which are separate programs and cannot reach an in-process fake.
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./

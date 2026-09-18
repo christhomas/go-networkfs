@@ -157,3 +157,46 @@ enumerates every driver for the `build-archives` job. Add a new entry
 alongside the existing ones — one line per driver — and add the same
 blank import to `cmd/networkfs/main.go` so the combined archive keeps
 covering everything.
+
+## S3 test server
+
+The S3 driver is tested against a real S3 server rather than a fake:
+[stupid-simple-s3][sss3] (sss3), pinned to **v1.0.7**. It replaced MinIO,
+whose `minio/minio` image stopped resolving on Docker Hub
+([#7](https://github.com/christhomas/go-networkfs/issues/7)).
+
+Two ways in, same server and same version:
+
+| | How | Needs Docker |
+|---|---|---|
+| `make test-s3` | [`scripts/sss3-server.sh`](../scripts/sss3-server.sh) fetches the release binary for the host platform, checks it against the published SHA-256, runs it from `build/sss3` | no |
+| `make servers-up` / `make test-docker` | `ghcr.io/espebra/stupid-simple-s3:1.0.7` on the shared test network | yes |
+
+The native path is the default for the S3 driver alone, because sss3 is a
+single static binary and the other servers are not. It is what makes the S3
+tests runnable on a laptop, macOS included, with nothing installed by hand.
+CI keeps the container so every server is reached by name on one network.
+
+`STUPID_BUCKET_NAME` creates the bucket at startup. That matters for the C
+harness in [`test/cabi/test_s3.c`](../test/cabi/test_s3.c), which has no way
+to create one: the Go tests make their own through the API, the C one cannot.
+MinIO needed a `docker exec ... mkdir` into its data directory for this; sss3
+does not, so the container path no longer reaches inside a running server.
+
+### What sss3 does not implement
+
+Verified against v1.0.7 and v2.0.12 — both behave the same. None of these is
+reached by the driver, which is why sss3 is a fair stand-in, but a driver
+change that started using one would go green locally and be wrong:
+
+- **`ListBuckets` (`GET /`)** — returns `NoSuchBucket`. The driver checks a
+  named bucket with `BucketExists`, which works.
+- **`UploadPartCopy`** — server-side multipart copy, which minio-go uses for
+  `ComposeObject` and for `CopyObject` of objects over 5 GiB. Single-part
+  `CopyObject` works, and that is what `Rename` uses.
+- **`max-keys`** — ignored; the server returns the whole listing. The driver
+  passes `MaxKeys: 1` in `Stat`'s directory probe as a hint and reads one
+  event before cancelling, so it is correct either way, just not short-circuited
+  server-side.
+
+[sss3]: https://github.com/espebra/stupid-simple-s3

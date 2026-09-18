@@ -106,9 +106,18 @@ Passed to `Mount` as `map[string]string` (Go) or a JSON object (C ABI).
   inline image preview (Kitty / iTerm2 / tmux passthrough).
 - `.env.yaml`-based account presets for the docker-compose test rig
   (FTP / SFTP / WebDAV / SMB).
-- Dropbox / WebDAV / S3 / GDrive / OneDrive integration tests run
+- Dropbox / WebDAV / GDrive / OneDrive integration tests run
   against `httptest.NewServer` fakes — CI exercises the JSON
   envelopes without live credentials.
+- S3 integration tests run behind `//go:build s3_integration` against a
+  real S3 server — [stupid-simple-s3][sss3], pinned to v1.0.7. `make
+  test-s3` fetches the release binary for the host platform, checks it
+  against the published SHA-256 and runs it: no Docker, no server
+  installed by hand, Linux and macOS alike. CI's containerised job runs
+  the same version as `ghcr.io/espebra/stupid-simple-s3:1.0.7`, because
+  there every server is a container on one network.
+
+[sss3]: https://github.com/espebra/stupid-simple-s3
 - SMB integration tests run behind `//go:build smb_integration` against
   a real SMB server (no embeddable Go SMB server exists).
 
@@ -159,14 +168,18 @@ HEAD. Run with `make test` (race detector + coverage). Run with `make
 test-short` to skip suites that bring up embedded servers.
 
 Mocked vs. real:
-- **In-process fakes:** Dropbox, OneDrive, GDrive, S3, WebDAV
+- **In-process fakes:** Dropbox, OneDrive, GDrive, WebDAV
   integration tests use `httptest.NewServer` fakes that mirror the
-  real API JSON envelopes — no live credentials needed in CI.
+  real API JSON envelopes — no live credentials needed in CI. S3 has
+  these too, and additionally a real server (below).
 - **In-process real servers:** FTP (`goftp.io/server/v2`), SFTP
   (`gliderlabs/ssh` + `pkg/sftp`).
 - **External services:** SMB (`smb_integration` build tag), Dropbox
   end-to-end (`dropbox_integration` build tag) — both require real
   credentials and are skipped in CI.
+- **Real server, no credentials:** S3 (`s3_integration` build tag)
+  against stupid-simple-s3 — `make test-s3` brings one up and takes it
+  down, Docker or not.
 - **Docker harness:** `test-server/docker-compose.yml` brings up
   vsftpd / openssh-sftp / apache-webdav / samba on local ports; four
   matching `.env.yaml` presets feed the TUI directly.
@@ -386,10 +399,15 @@ presets are in [test-server/.env.yaml](test-server/.env.yaml):
 ../build/networkfs --account docker-smb
 ```
 
-Dropbox / GDrive / OneDrive / S3 aren't in the test server (none can be
+Dropbox / GDrive / OneDrive aren't in the test server (none can be
 self-hosted in a way that matches their real API surface). Their
 end-to-end integration tests live behind `//go:build <name>_integration`
 tags and require real credentials.
+
+S3 is self-hostable and so is not in that list: `make test-s3` runs the
+tests against a real [stupid-simple-s3][sss3] with no Docker and no
+credentials. What it does not cover is noted in
+[docs/DRIVERS.md](docs/DRIVERS.md#s3-test-server).
 
 ## Architecture
 

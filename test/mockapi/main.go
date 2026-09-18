@@ -1,9 +1,9 @@
 // A stand-in for the three hosted APIs this project talks to.
 //
 // Dropbox, Google Drive and OneDrive cannot be run locally the way Samba or
-// MinIO can, so the drivers that use them could only ever be tested against
-// in-process fakes. That leaves the C ABI harnesses out: they are separate
-// programs and cannot reach an httptest server inside a Go test.
+// stupid-simple-s3 can, so the drivers that use them could only ever be tested
+// against in-process fakes. That leaves the C ABI harnesses out: they are
+// separate programs and cannot reach an httptest server inside a Go test.
 //
 // This is the same idea as those fakes, as a standalone server. It speaks
 // enough of each API for the drivers to mount and do real work, backed by one

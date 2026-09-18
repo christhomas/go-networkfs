@@ -4,7 +4,7 @@
 #   test              go test -race with coverage
 #   test-short        skip integration tests that start embedded servers
 #   test-smb          SMB driver integration tests against a Samba container
-#   test-s3           S3 driver integration tests against a MinIO container
+#   test-s3           S3 driver integration tests against a local sss3
 #   test-integration  every driver's integration tests, with coverage
 #   test-cabi         the C ABI, exercised from C against a real server
 #   bench             run benchmarks against the FTP driver
@@ -40,14 +40,25 @@ SMB_PORT      ?= 4445
 SMB_IMAGE     ?= go-networkfs-samba:test
 SMB_CONTAINER ?= go-networkfs-samba
 
-# MinIO speaks the S3 protocol, so the S3 driver can be tested against the
-# real thing rather than a hand-written stub of it.
+# stupid-simple-s3 speaks the S3 protocol, so the S3 driver can be tested
+# against the real thing rather than a hand-written stub of it. It ships both
+# as an image and as a single static binary, so unlike Samba it does not need
+# a container: `make test-s3` runs the binary (see scripts/sss3-server.sh) and
+# needs no Docker at all. The container is for `servers-up`, where every server
+# has to sit on one network for the containerised runner to reach by name.
 S3_PORT       ?= 9000
-S3_IMAGE      ?= minio/minio:latest
-S3_CONTAINER  ?= go-networkfs-minio
+S3_VERSION    ?= 1.0.7
+S3_IMAGE      ?= ghcr.io/espebra/stupid-simple-s3:$(S3_VERSION)
+S3_CONTAINER  ?= go-networkfs-sss3
 S3_BUCKET     ?= testbucket
-S3_KEY        ?= minioadmin
-S3_SECRET     ?= minioadmin
+S3_KEY        ?= sss3admin
+S3_SECRET     ?= sss3admin123
+# The image is distroless and runs as `nonroot`, which owns exactly one
+# directory: the one its own Dockerfile prepares and chowns. Pointing the
+# server anywhere else — /data, say — leaves it unable to create the storage
+# directory, and it exits 1 on the spot.
+S3_DATA       ?= /var/lib/stupid-simple-s3/data
+S3_TMP        ?= /var/lib/stupid-simple-s3/tmp
 
 # The remaining servers. Each driver that can be given one gets one, so its
 # C harness can mount and reach the success paths rather than only the
@@ -124,17 +135,48 @@ define wait_for_port
 	echo " timed out"; docker logs $(1); exit 1
 endef
 
-.PHONY: minio-up
-minio-up: network-up
+# Wait for a container to answer on HTTP, or dump its logs and fail.
+#
+# wait_for_port is not enough on its own: `docker run -p` starts a proxy on the
+# host that accepts connections whether or not anything inside the container is
+# still alive, so a server that exited on startup still passes it. That cost an
+# afternoon — sss3 exiting 1 on an unwritable storage path looked ready, and
+# surfaced ninety seconds later as the C harness failing to mount.
+define wait_for_health
+	@printf 'waiting for $(1) to answer /healthz'
+	@for i in $$(seq 1 40); do \
+		if curl -fsS -o /dev/null http://127.0.0.1:$(2)/healthz 2>/dev/null; then echo " ready"; exit 0; fi; \
+		printf '.'; sleep 1; \
+	done; \
+	echo " timed out"; docker logs $(1); exit 1
+endef
+
+# sss3 listens on 5553 and creates STUPID_BUCKET_NAME at startup, so the
+# bucket exists before anything connects. The Go tests make their own bucket
+# through the API; the C harness has no way to, which is what the pre-creation
+# is for. No `docker exec` reaching into the server's data directory.
+.PHONY: sss3-up
+sss3-up: network-up
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
-	docker run -d --network $(TEST_NETWORK) --network-alias minio --name $(S3_CONTAINER) -p $(S3_PORT):9000 \
-		-e MINIO_ROOT_USER=$(S3_KEY) -e MINIO_ROOT_PASSWORD=$(S3_SECRET) \
-		$(S3_IMAGE) server /data
+	docker run -d --network $(TEST_NETWORK) --network-alias sss3 --name $(S3_CONTAINER) -p $(S3_PORT):5553 \
+		-e STUPID_PORT=5553 \
+		-e STUPID_STORAGE_PATH=$(S3_DATA) -e STUPID_MULTIPART_PATH=$(S3_TMP) \
+		-e STUPID_RW_ACCESS_KEY=$(S3_KEY) -e STUPID_RW_SECRET_KEY=$(S3_SECRET) \
+		-e STUPID_BUCKET_NAME=$(S3_BUCKET) -e STUPID_LOG_LEVEL=warn \
+		$(S3_IMAGE)
 	$(call wait_for_port,$(S3_CONTAINER),$(S3_PORT))
-	@# MinIO's filesystem backend stores a bucket as a directory, so this is
-	@# enough to create one without pulling in the mc client. The Go tests make
-	@# their own bucket through the API; the C harness has no way to.
-	@docker exec $(S3_CONTAINER) mkdir -p /data/$(S3_BUCKET)
+	$(call wait_for_health,$(S3_CONTAINER),$(S3_PORT))
+
+# The same server, no Docker. Fetches the pinned release binary for the host
+# platform, checks it against the published SHA-256, and runs it from build/.
+.PHONY: sss3-native-up
+sss3-native-up:
+	@S3_PORT=$(S3_PORT) S3_BUCKET=$(S3_BUCKET) S3_KEY=$(S3_KEY) S3_SECRET=$(S3_SECRET) \
+		SSS3_VERSION=$(S3_VERSION) scripts/sss3-server.sh up
+
+.PHONY: sss3-native-down
+sss3-native-down:
+	@scripts/sss3-server.sh down
 
 .PHONY: ftp-up
 ftp-up: network-up
@@ -196,14 +238,14 @@ network-up:
 		docker network create $(TEST_NETWORK) >/dev/null
 
 .PHONY: servers-up
-servers-up: samba-up minio-up ftp-up sftp-up webdav-up mockapi-up
+servers-up: samba-up sss3-up ftp-up sftp-up webdav-up mockapi-up
 
 .PHONY: servers-down
-servers-down: samba-down minio-down ftp-down sftp-down webdav-down mockapi-down
+servers-down: samba-down sss3-down ftp-down sftp-down webdav-down mockapi-down
 	@docker network rm $(TEST_NETWORK) >/dev/null 2>&1 || true
 
-.PHONY: minio-down
-minio-down:
+.PHONY: sss3-down
+sss3-down:
 	@docker rm -f $(S3_CONTAINER) >/dev/null 2>&1 || true
 
 .PHONY: samba-up
@@ -217,13 +259,14 @@ samba-up: network-up
 samba-down:
 	@docker rm -f $(SMB_CONTAINER) >/dev/null 2>&1 || true
 
-# S3 driver against a throwaway MinIO.
+# S3 driver against a throwaway sss3. Docker-free: the binary is fetched and
+# run directly, so this works on a developer machine with no daemon.
 .PHONY: test-s3
-test-s3: minio-up
+test-s3: sss3-native-up
 	@S3_ENDPOINT=$(S3_ADDR):$(S3_PORT) S3_BUCKET=$(S3_BUCKET) \
 		S3_ACCESS_KEY=$(S3_KEY) S3_SECRET_KEY=$(S3_SECRET) S3_SECURE=false \
 		$(GO) test -race -count=1 -tags=s3_integration -run Integration ./s3/... ; \
-		status=$$? ; $(MAKE) minio-down ; exit $$status
+		status=$$? ; $(MAKE) sss3-native-down ; exit $$status
 
 # Every driver that needs a server, with one coverage profile over the lot.
 # This is the number that matters: without the tags most of each driver is
@@ -333,7 +376,7 @@ test-docker: servers-up
 	@docker run --rm --network $(TEST_NETWORK) \
 		-v "$(CURDIR)":/src -v go-networkfs-gomod:/go/pkg/mod \
 		-e SMB_ADDR=samba  -e SMB_PORT=445 \
-		-e S3_ADDR=minio   -e S3_PORT=9000 \
+		-e S3_ADDR=sss3    -e S3_PORT=5553 \
 		-e FTP_ADDR=ftp    -e FTP_PORT=21 \
 		-e SFTP_ADDR=sftp  -e SFTP_PORT=22 \
 		-e DAV_ADDR=webdav -e DAV_PORT=80 \
