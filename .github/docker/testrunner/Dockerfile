@@ -16,7 +16,7 @@
 FROM golang:1.26-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev netcat-openbsd curl ca-certificates \
+    && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ARG CHORE_VERSION=0.11.0

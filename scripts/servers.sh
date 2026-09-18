@@ -85,13 +85,37 @@ build_image() {   # $1 = tag, rest = docker build arguments
     fi
 }
 
+# Pull quietly, so `docker run` has nothing to say about layers.
+#
+# `docker run` pulls a missing image and prints a progress line per layer as it
+# goes: 150 lines for the four pulled servers on a cold machine, which was most
+# of what the `docker` tier printed and none of it worth reading. -q prints the
+# digest and nothing else, and it only runs at all when the image is not
+# already local. --verbose pulls the loud way.
+ensure_image() {   # $1 = image reference
+    docker image inspect "$1" >/dev/null 2>&1 && return 0
+    if [ "$VERBOSE" = 1 ]; then
+        docker pull "$1"
+    else
+        docker pull -q "$1" >/dev/null
+    fi
+}
+
 # Wait for a container's published port, or dump the container's logs and fail.
 # A server that is up but not yet listening fails the first test rather than
 # the whole suite, which reads as a driver bug; this is what stops that.
+#
+# BASH'S /dev/tcp, NOT nc. The Makefile used `nc -z`, and a machine without
+# netcat — this one, and a bare Debian — got a forty-second wait and
+# "did not answer on port 4445", which names the server for the absence of a
+# tool. /dev/tcp is the shell's own and needs nothing installed.
 wait_for_port() {   # $1 = container, $2 = published port
     local container="$1" port="$2"
     for _ in $(seq 1 40); do
-        if nc -z 127.0.0.1 "$port" 2>/dev/null; then return 0; fi
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            exec 3<&- 3>&-
+            return 0
+        fi
         sleep 1
     done
     echo "servers.sh: $container did not answer on port $port within 40s" >&2
@@ -137,6 +161,7 @@ up_samba() {
 # exists before anything connects. The Go tests make their own bucket through
 # the API; the C harness has no way to, which is what the pre-creation is for.
 up_s3() {
+    ensure_image "$S3_IMAGE"
     rm_container "$S3_CONTAINER"
     docker run -d --network "$TEST_NETWORK" --network-alias sss3 \
         --name "$S3_CONTAINER" -p "$S3_PORT:5553" \
@@ -160,6 +185,7 @@ up_s3_native() {
 down_s3_native() { scripts/sss3-server.sh down; }
 
 up_ftp() {
+    ensure_image "$FTP_IMAGE"
     rm_container "$FTP_CONTAINER"
     # Passive mode hands the client a second port to connect back on, so the
     # range has to be published as well as the control port.
@@ -173,6 +199,7 @@ up_ftp() {
 }
 
 up_sftp() {
+    ensure_image "$SFTP_IMAGE"
     rm_container "$SFTP_CONTAINER"
     docker run -d --network "$TEST_NETWORK" --network-alias sftp \
         --name "$SFTP_CONTAINER" -p "$SFTP_PORT:22" \
@@ -182,6 +209,7 @@ up_sftp() {
 }
 
 up_webdav() {
+    ensure_image "$DAV_IMAGE"
     rm_container "$DAV_CONTAINER"
     docker run -d --network "$TEST_NETWORK" --network-alias webdav \
         --name "$DAV_CONTAINER" -p "$DAV_PORT:80" \

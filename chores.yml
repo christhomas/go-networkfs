@@ -108,9 +108,15 @@ chore_min_version: 0.6.0
 #                                                    once per cgo test binary,
 #                                                    and there are nine of
 #                                                    them. ubuntu: 25 / 2,190
-#     suite       PENDING             120 /  12,000   the Go suite's 21 lines,
-#                                                    nine C harnesses and the
-#                                                    coverage total
+#     suite        35 /  26,810       50 /  35,000   ~30%. The BYTES are the
+#                                                    number to look at: -coverpkg
+#                                                    names 24 packages and
+#                                                    `go test` repeats the whole
+#                                                    list on every one of the 21
+#                                                    `ok` lines, 1,250 characters
+#                                                    each. That is 80% of this
+#                                                    tier and it is go test's
+#                                                    doing, not ours
 #     docker      PENDING              40 /   4,000   the servers' six lines
 #                                                    and the inner verdict
 #     smb         PENDING              20 /   2,000   two packages
@@ -270,7 +276,7 @@ tasks:
     # image build. `test` is what CI runs and what a bug report should quote.
     cmds:
       - task: deps
-      - 'scripts/with-servers.sh all -- scripts/tier.sh test:integration suite 120 12000 -- scripts/suite.sh'
+      - 'scripts/with-servers.sh all -- scripts/tier.sh test:integration suite 50 35000 -- scripts/suite.sh'
 
   test:ci:
     desc: "The suite with the servers ALREADY up — what runs inside the runner container"
@@ -279,7 +285,7 @@ tasks:
     # and you get the same run without the image build.
     cmds:
       - task: deps
-      - 'scripts/tier.sh test:ci suite 120 12000 -- scripts/suite.sh'
+      - 'scripts/tier.sh test:ci suite 50 35000 -- scripts/suite.sh'
 
   test:
     desc: "Everything CI runs: every server, the whole tagged suite and the C ABI, inside a container"
