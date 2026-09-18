@@ -4,7 +4,7 @@
 # MinIO can. This stands in for all three so the drivers that use them can be
 # tested without any connected service — including from the C ABI harnesses,
 # which are separate programs and cannot reach an in-process fake.
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./

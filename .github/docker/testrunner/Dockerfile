@@ -4,7 +4,7 @@
 # compiler for the ABI harnesses, and make. A contributor needs Docker and
 # nothing else, and CI runs the same image rather than a runner image that
 # happens to have the right versions on it.
-FROM golang:1.25-bookworm
+FROM golang:1.26-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev make netcat-openbsd \
